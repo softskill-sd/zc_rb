@@ -1,0 +1,1241 @@
+set(ALLEGRO_LEGACY_CLOSE_THREADS ON CACHE BOOL "" FORCE)
+if(APPLE)
+	# needed for https://gitlab.kitware.com/cmake/cmake/-/commit/7b99c42e57b11afe818827ac537ca020c020addd
+	cmake_minimum_required(VERSION 3.29)
+else()
+	cmake_minimum_required(VERSION 3.27)
+endif()
+set(CMAKE_CONFIGURATION_TYPES Asan Debug Release RelWithDebInfo Coverage CACHE STRING INTERNAL FORCE)
+project (ZeldaClassic HOMEPAGE_URL "https://www.zquestclassic.com")
+
+# CMake 4 rejects dependencies whose cmake_minimum_required is below 3.5
+# (allegro_legacy, gme, websocketpp). This raises their policy floor to 3.5;
+# it never lowers anything, and older CMake ignores the variable entirely.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+	set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
+if(UNIX AND NOT APPLE)
+	set(LINUX TRUE)
+endif()
+
+set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(FetchContent)
+include(CodeCoverage)
+
+set(USE_PCH FALSE CACHE BOOL "Use precompiled headers")
+set(UNITY_BUILD FALSE CACHE BOOL "Unity build")
+set(WANT_ZUPDATER TRUE CACHE BOOL "Build the zupdater target")
+set(WANT_SENTRY FALSE CACHE BOOL "Include Sentry for crash dump handling")
+set(WANT_FUZZ FALSE CACHE BOOL "Set FUZZ CXX definition")
+set(WANT_GIT_HOOKS TRUE CACHE BOOL "Install git hooks")
+set(WANT_VENDORED_ZLIB TRUE CACHE BOOL "Build the vendored library at third_party/zlib")
+set(WANT_VENDORED_LIBPNG TRUE CACHE BOOL "Build the vendored library at third_party/libpng")
+set(WANT_VENDORED_DUMB TRUE CACHE BOOL "Build the vendored library at third_party/dumb")
+set(WANT_VENDORED_LIBJPEG_TURBO TRUE CACHE BOOL "Build the vendored library at third_party/libjpeg_turbo")
+set(ZC_OFFICIAL "" CACHE BOOL "Official build")
+set(WANT_ERROR_CHECKING TRUE CACHE BOOL "")
+set(RELEASE_TAG "" CACHE STRING "Version string")
+set(RELEASE_PLATFORM "" CACHE STRING "Release platform. Ex: mac, linux, windows-x86, windows-x64")
+set(RELEASE_CHANNEL "" CACHE STRING "Release channel. Used by updater to find new releases")
+set(REPO "" CACHE STRING "Repo URL")
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(ZC_OFFICIAL)
+	if(NOT RELEASE_TAG)
+		message(FATAL_ERROR "Missing expected RELEASE_TAG")
+	endif()
+	if(NOT RELEASE_CHANNEL)
+		message(FATAL_ERROR "Missing expected RELEASE_CHANNEL")
+	endif()
+	if(NOT REPO)
+		message(FATAL_ERROR "Missing expected REPO")
+	endif()
+endif()
+
+find_program(PYTHON python3 python REQUIRED)
+
+# Write a link map next to the executables. scripts/named_from_map.py turns it into symbol names for
+# the module offsets the state-diff tooling (ZC_GLOBAL_COMPARE_FRAMES) reports, so a global that a
+# restore did not put back can be named instead of guessed at. Off by default; build-directory only.
+option(ZC_LINK_MAP "Write a linker map for the state-diff tooling" OFF)
+if(ZC_LINK_MAP AND MSVC)
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /MAP")
+endif()
+
+if(MSVC)
+	set(CMAKE_CXX_FLAGS_ASAN "${CMAKE_CXX_FLAGS_DEBUG} /fsanitize=address /Zi" CACHE STRING "" FORCE)
+	set(CMAKE_C_FLAGS_ASAN "${CMAKE_C_FLAGS_DEBUG} /fsanitize=address /Zi" CACHE STRING "" FORCE)
+	set(CMAKE_EXE_LINKER_FLAGS_ASAN "${CMAKE_EXE_LINKER_FLAGS_DEBUG} /fsanitize=address /DEBUG" CACHE STRING "" FORCE)
+	set(CMAKE_SHARED_LINKER_FLAGS_ASAN "${CMAKE_SHARED_LINKER_FLAGS_DEBUG} /fsanitize=address /DEBUG" CACHE STRING "" FORCE)
+	set(CMAKE_MODULE_LINKER_FLAGS_ASAN "${CMAKE_MODULE_LINKER_FLAGS_DEBUG} /fsanitize=address /DEBUG" CACHE STRING "" FORCE)
+else()
+	set(CMAKE_CXX_FLAGS_ASAN "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address -fno-omit-frame-pointer" CACHE STRING "" FORCE)
+	set(CMAKE_C_FLAGS_ASAN "${CMAKE_C_FLAGS_DEBUG} -fsanitize=address -fno-omit-frame-pointer" CACHE STRING "" FORCE)
+	set(CMAKE_EXE_LINKER_FLAGS_ASAN "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address" CACHE STRING "" FORCE)
+endif()
+
+if(WANT_GIT_HOOKS)
+	if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git")
+		if(UNIX)
+			configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/commit-msg.in" "${CMAKE_SOURCE_DIR}/.git/commit-msg")
+			configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepare-commit-msg.in" "${CMAKE_SOURCE_DIR}/.git/prepare-commit-msg")
+			file(
+				COPY "${CMAKE_SOURCE_DIR}/.git/commit-msg"
+				DESTINATION "${CMAKE_SOURCE_DIR}/.git/hooks"
+				FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+			)
+			file(
+				COPY "${CMAKE_SOURCE_DIR}/.git/prepare-commit-msg"
+				DESTINATION "${CMAKE_SOURCE_DIR}/.git/hooks"
+				FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+			)
+		else()
+			configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/commit-msg.in" "${CMAKE_SOURCE_DIR}/.git/hooks/commit-msg")
+			configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepare-commit-msg.in" "${CMAKE_SOURCE_DIR}/.git/hooks/prepare-commit-msg")
+		endif()
+	endif()
+endif()
+
+# This allows outputs to be run where they are by putting their libaries in
+# the same folder. 
+set (CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# Hide various test-related targets created by GME cmake so they
+# don't clutter up the Solution file. https://gitlab.kitware.com/cmake/cmake/-/issues/21730
+set_property(GLOBAL PROPERTY CTEST_TARGETS_ADDED 1)
+
+set(BUILD_TESTING OFF CACHE BOOL "")
+
+if(LINUX)
+	# https://stackoverflow.com/a/71321163/2788187
+	SET(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
+
+	# Don't re-export symbols from vendored static libraries (libpng, libjpeg,
+	# zlib, vorbis, ...) in our shared libraries. Without this, system libraries
+	# loaded into the process later (e.g. GTK/gdk-pixbuf when a native file
+	# dialog opens) can bind their libpng/libjpeg/zlib calls to our vendored
+	# copies, which crashes on some distros.
+	# Skipped for Asan builds: the statically-linked sanitizer runtime's
+	# malloc/free interceptors must remain exported so shared libraries bind
+	# to them. Skipped for Emscripten (LINUX is set for it above, but wasm-ld
+	# doesn't support the flag).
+	if(NOT EMSCRIPTEN)
+		add_link_options("$<$<NOT:$<CONFIG:Asan>>:-Wl,--exclude-libs,ALL>")
+
+		# Emit GNU build-ids: upstream clang doesn't by default (distro
+		# compilers patch it in). Without one, crashpad and sentry-cli fall
+		# back to hashing file bytes for the debug id, and cpack's
+		# install-time RPATH rewrite changes the executables' bytes - so
+		# Linux crash reports never matched the uploaded debug info.
+		add_link_options("-Wl,--build-id=sha1")
+	endif()
+endif()
+
+if(APPLE)
+	find_program(DSYMUTIL_PROGRAM dsymutil)
+	if (DSYMUTIL_PROGRAM)
+		foreach(lang C CXX)
+			foreach(var LINK_EXECUTABLE CREATE_SHARED_LIBRARY)
+				set(CMAKE_${lang}_${var} "${CMAKE_${lang}_${var}}" "${DSYMUTIL_PROGRAM} <TARGET>")
+			endforeach()
+		endforeach()
+	endif()
+
+	# Using an API newer than the deployment target without an availability
+	# guard would crash at runtime on the older systems the target claims to
+	# support (CI builds target the oldest supported macOS - see
+	# CMAKE_OSX_DEPLOYMENT_TARGET in .github/workflows/build.yml). Surface
+	# that at compile time instead.
+	add_compile_options(-Werror=unguarded-availability-new)
+endif()
+
+if(LINUX)
+	find_program(EU_STRIP_PROGRAM eu-strip)
+	if (EU_STRIP_PROGRAM)
+		foreach(lang C CXX)
+			foreach(var LINK_EXECUTABLE CREATE_SHARED_LIBRARY)
+				set(CMAKE_${lang}_${var} "${CMAKE_${lang}_${var}}" "${EU_STRIP_PROGRAM} --strip-debug -f <TARGET>.debug <TARGET>")
+			endforeach()
+		endforeach()
+	endif()
+endif()
+
+# Strip unreferenced code and data from optimized binaries. Every app links
+# the same large static libraries, and the linker otherwise keeps whole
+# object files - e.g. zlauncher carries most of the engine's GUI framework
+# without ever calling it. Static initializers survive: both dead_strip and
+# --gc-sections treat init_array/mod_init_func entries as roots. Scoped to
+# the shipping configs; unreachable code is still handy under a debugger.
+if(NOT EMSCRIPTEN)
+	set(strip_cfgs "$<CONFIG:Release,RelWithDebInfo>")
+	if(MSVC)
+		add_compile_options("$<${strip_cfgs}:/Gy;/Gw>")
+		# RelWithDebInfo links with /DEBUG, which defaults these to off.
+		add_link_options("$<${strip_cfgs}:/OPT:REF;/OPT:ICF>")
+	else()
+		add_compile_options("$<${strip_cfgs}:-ffunction-sections;-fdata-sections>")
+		if(APPLE)
+			add_link_options("$<${strip_cfgs}:-Wl,-dead_strip>")
+		elseif(LINUX)
+			add_link_options("$<${strip_cfgs}:-Wl,--gc-sections>")
+		endif()
+	endif()
+endif()
+
+function(enable_unity_build UB_SUFFIX SOURCE_VARIABLE_NAME)
+  set(files ${${SOURCE_VARIABLE_NAME}})
+  # Generate a unique filename for the unity build translation unit
+  set(unit_build_file ${CMAKE_CURRENT_BINARY_DIR}/UB_${UB_SUFFIX}.cpp)
+  # Exclude all translation units from compilation
+  set_source_files_properties(${files} PROPERTIES HEADER_FILE_ONLY true)
+  # Open the ub file
+  FILE(WRITE ${unit_build_file} "// Unity Build generated by CMake\n")
+  # Add include statement for each translation unit
+  foreach(source_file ${files} )
+	FILE( APPEND ${unit_build_file} "#include <${CMAKE_CURRENT_SOURCE_DIR}/${source_file}>\n")
+  endforeach(source_file)
+  # Complement list of translation units with the name of ub
+  set(${SOURCE_VARIABLE_NAME} ${${SOURCE_VARIABLE_NAME}} ${unit_build_file} PARENT_SCOPE)
+endfunction(enable_unity_build)
+
+set(ZC_INSTALL_TARGETS "")
+
+#############################################################
+# deps
+#############################################################
+
+set(BUILD_SHARED_LIBS ON)
+
+add_subdirectory(third_party)
+
+FetchContent_Declare(json
+	URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+	EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(json)
+
+if (NOT EMSCRIPTEN)
+	FetchContent_Declare(
+		stduuid
+		GIT_REPOSITORY
+			https://github.com/mariusbancila/stduuid
+		GIT_TAG
+			3afe7193facd5d674de709fccc44d5055e144d7a
+		PATCH_COMMAND  git restore . && git apply ${CMAKE_SOURCE_DIR}/third_party/stduuid.patch
+		EXCLUDE_FROM_ALL
+	)
+	set(UUID_SYSTEM_GENERATOR ON CACHE INTERNAL "")
+	FetchContent_MakeAvailable(stduuid)
+endif()
+
+if (NOT EMSCRIPTEN)
+	FetchContent_Declare(
+		nativefiledialog
+		GIT_REPOSITORY
+			https://github.com/btzy/nativefiledialog-extended
+		GIT_TAG
+			660493307dd6a8d7fe5fa77cb1c23cbb18ff17c3
+		EXCLUDE_FROM_ALL
+	)
+	set(BUILD_SHARED_LIBS_PREV ${BUILD_SHARED_LIBS})
+	set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+	set(BUILD_SHARED_LIBS OFF)
+	set(NFD_INSTALL OFF CACHE BOOL "" FORCE)
+	set(NFD_OVERRIDE_RECENT_WITH_DEFAULT ON CACHE BOOL "" FORCE)
+	if(LINUX)
+		# Use the xdg-desktop-portal backend instead of in-process GTK3.
+		# The dialog is provided out-of-process by the desktop environment,
+		# which works on Wayland and avoids loading GTK (and its transitive
+		# libraries) into our process. Requires libdbus-1-dev to build and
+		# xdg-desktop-portal at runtime (standard on modern desktops).
+		set(NFD_PORTAL ON CACHE BOOL "" FORCE)
+	endif()
+	FetchContent_MakeAvailable(nativefiledialog) # exposed as nfd
+	set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_PREV} CACHE BOOL "" FORCE)
+	set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_PREV})
+	set(USE_NFD ON)
+endif()
+
+
+find_package(CURL)
+
+#############################################################
+# Allegro
+#############################################################
+
+# SDL WIP:
+#    cmake .. -DALLEGRO_SDL=on -DWANT_NATIVE_DIALOG=off
+# https://github.com/liballeg/allegro5/issues/1335
+
+if(APPLE)
+	# OSX 12
+	add_definitions(-DMAC_OS_X_VERSION_MIN_REQUIRED=120000)
+else()
+	add_definitions(-DALLEGRO_NO_MAGIC_MAIN)
+endif()
+add_definitions(-DALLEGRO_KCM_AUDIO_SRC)
+# Needed to build on Mac, otherwise get this error:
+#    aintern_bitmap.h:154:33: error: unknown type name 'ALLEGRO_BITMAP_WRAP'
+add_definitions(-DALLEGRO_UNSTABLE)
+add_compile_definitions("$<$<CONFIG:DEBUG>:DEBUGMODE>")
+add_compile_definitions("$<$<CONFIG:ASAN>:DEBUGMODE>")
+
+set(MINIMP3_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include/minimp3)
+
+if(NOT EMSCRIPTEN)
+	# Vendored SDL2, used only by allegro's SDL joystick driver (see
+	# WANT_SDL2_JOYSTICK below); only joystick-related subsystems are built.
+	# Unlike the native evdev/HID/directinput drivers, SDL keeps working when
+	# Steam Input has grabbed the controller, and it brings SDL's controller
+	# database. It is the default on Windows, macOS, and Linux; setting
+	# [joystick] driver = native opts back into the OS-native drivers (the
+	# launcher exposes this).
+	FetchContent_Declare(
+	  SDL2
+	  GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+	  GIT_TAG        release-2.32.10
+	  GIT_SHALLOW    TRUE
+	  PATCH_COMMAND  git restore . && git apply ${CMAKE_SOURCE_DIR}/third_party/sdl2.patch
+	  EXCLUDE_FROM_ALL
+	)
+	set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+	set(SDL_STATIC ON CACHE BOOL "" FORCE)
+	# The static lib links into the shared liballegro, so it must be PIC.
+	set(SDL_STATIC_PIC ON CACHE BOOL "" FORCE)
+	set(SDL_TEST OFF CACHE BOOL "" FORCE)
+	set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+	set(SDL2_DISABLE_UNINSTALL ON CACHE BOOL "" FORCE)
+	set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
+	set(SDL_AUDIO OFF CACHE BOOL "" FORCE)
+	set(SDL_VIDEO OFF CACHE BOOL "" FORCE)
+	set(SDL_RENDER OFF CACHE BOOL "" FORCE)
+	set(SDL_POWER OFF CACHE BOOL "" FORCE)
+	set(SDL_FILESYSTEM OFF CACHE BOOL "" FORCE)
+	set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
+	set(SDL_LOCALE OFF CACHE BOOL "" FORCE)
+	set(SDL_MISC OFF CACHE BOOL "" FORCE)
+	FetchContent_MakeAvailable(SDL2)
+	set(WANT_SDL2_JOYSTICK ON CACHE BOOL "" FORCE)
+endif()
+
+FetchContent_Declare(
+  allegro5
+  GIT_REPOSITORY https://github.com/connorjclark/allegro5.git
+  GIT_TAG        2e0cd0e33411a2e2374fd3c864f4fc1c62f4b352
+  EXCLUDE_FROM_ALL
+)
+set(SHARED OFF CACHE BOOL "" FORCE)
+set(SHARED OFF)
+set(STATIC_RUNTIME OFF CACHE BOOL "" FORCE)
+set(WANT_STATIC_RUNTIME OFF CACHE BOOL "" FORCE)
+add_compile_definitions(ALLEGRO_STATICLINK ALLEGRO_LEGACY_STATICLINK)
+set(WANT_TESTS OFF CACHE BOOL "" FORCE)
+set(WANT_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WANT_DEMO OFF CACHE BOOL "" FORCE)
+set(WANT_DOCS OFF CACHE BOOL "" FORCE)
+set(WANT_IMAGE_WEBP OFF CACHE BOOL "" FORCE)
+# JPEG support is always wanted: with the vendored libjpeg-turbo the find
+# results are pre-seeded by third_party/CMakeLists.txt, otherwise Allegro
+# finds the system libjpeg itself.
+set(WANT_IMAGE_JPG ON CACHE BOOL "" FORCE)
+set(WANT_OPUS OFF CACHE BOOL "" FORCE)
+set(WANT_DUMB ON CACHE BOOL "" FORCE)
+set(WANT_FLAC OFF CACHE BOOL "" FORCE)
+set(WANT_VIDEO OFF CACHE BOOL "" FORCE)
+set(WANT_ALLOW_SSE "sse3" CACHE STRING "" FORCE)
+FetchContent_MakeAvailable(allegro5)
+# Allegro 5 CMakeLists sets CMAKE_CONFIGURATION_TYPES in a way that doesn't work for us,
+# so set it back to our value.
+set(CMAKE_CONFIGURATION_TYPES Asan Debug Release RelWithDebInfo Coverage CACHE STRING INTERNAL FORCE)
+
+# Remove stale headers that were manually copied in previous versions.
+# TODO: delete this eventually.
+file(REMOVE 
+	"${allegro5_SOURCE_DIR}/include/allegro5/allegro_acodec.h"
+	"${allegro5_SOURCE_DIR}/include/allegro5/allegro_audio.h"
+	"${allegro5_SOURCE_DIR}/include/allegro5/allegro_font.h"
+	"${allegro5_SOURCE_DIR}/include/allegro5/allegro_image.h"
+	"${allegro5_SOURCE_DIR}/include/allegro5/allegro_native_dialog.h"
+	"${allegro5_SOURCE_DIR}/include/allegro5/allegro_primitives.h"
+	"${allegro5_SOURCE_DIR}/include/allegro5/internal/aintern_audio.h"
+)
+
+# Some performance problems with allegro legacy threaded event queues encouraged
+# NOT closing them on shutdown. This seemed to work ok on Windows and Mac, but on
+# Linux it totally prevents the program from closing.
+# TODO: investigate this further - can performance problems with threaded event queues
+# be fixed?
+if(LINUX AND NOT EMSCRIPTEN)
+	set(ALLEGRO_LEGACY_CLOSE_THREADS 1)
+endif()
+add_subdirectory(third_party/allegro_legacy EXCLUDE_FROM_ALL)
+
+add_library(allegro_headers INTERFACE)
+target_include_directories(allegro_headers INTERFACE
+	"${allegro5_SOURCE_DIR}/addons/acodec"
+	"${allegro5_SOURCE_DIR}/addons/audio"
+	"${allegro5_SOURCE_DIR}/addons/font"
+	"${allegro5_SOURCE_DIR}/addons/image"
+	"${allegro5_SOURCE_DIR}/addons/native_dialog"
+	"${allegro5_SOURCE_DIR}/addons/primitives"
+	"${allegro5_BINARY_DIR}/include"
+	"${allegro5_SOURCE_DIR}/include"
+)
+
+target_link_libraries(allegro-legacy PRIVATE allegro_headers)
+
+add_library(allegro_with_legacy INTERFACE)
+target_link_libraries(allegro_with_legacy INTERFACE allegro_headers allegro-legacy allegro_primitives allegro_font allegro_image allegro_audio allegro_acodec allegro_main)
+if (NOT EMSCRIPTEN)
+	target_link_libraries(allegro_with_legacy INTERFACE allegro_dialog)
+endif()
+
+target_include_directories(allegro_with_legacy INTERFACE 
+	"${CMAKE_CURRENT_SOURCE_DIR}/third_party/allegro_legacy/include"
+	"${CMAKE_CURRENT_BINARY_DIR}/third_party/allegro_legacy/include"
+)
+
+get_target_property(ALLEGRO_LINK_LIBRARIES allegro_with_legacy INTERFACE_LINK_LIBRARIES)
+list(APPEND ZC_INSTALL_TARGETS allegro ${ALLEGRO_LINK_LIBRARIES})
+
+if(DEFINED ENV{CI} OR ZC_OFFICIAL)
+	get_target_property(ALLEGRO_CODEC_SOURCES allegro_acodec SOURCES)
+	message("${ALLEGRO_CODEC_SOURCES}")
+	if(NOT "ogg.c" IN_LIST ALLEGRO_CODEC_SOURCES)
+		message(FATAL_ERROR "Missing support for OGG")
+	endif()
+	if(NOT "mp3.c" IN_LIST ALLEGRO_CODEC_SOURCES)
+		message(FATAL_ERROR "Missing support for MP3")
+	endif()
+	# TODO: why not working for web build in CI?
+	if(NOT EMSCRIPTEN AND NOT "dumb.c" IN_LIST ALLEGRO_CODEC_SOURCES)
+		message(FATAL_ERROR "Missing support for DUMB")
+	endif()
+
+	get_target_property(ALLEGRO_AUDIO_SOURCES allegro_audio SOURCES)
+	message("${ALLEGRO_AUDIO_SOURCES}")
+	if(NOT EMSCRIPTEN AND LINUX AND NOT "pulseaudio.c" IN_LIST ALLEGRO_AUDIO_SOURCES)
+		message(FATAL_ERROR "Missing support for PulseAudio")
+	endif()
+endif()
+
+#############################################################
+# Header and source file lists
+#############################################################
+
+set(ZELDA_MODULES
+	${CMAKE_SOURCE_DIR}/modules/zelda/ZeldaCore.txt
+	${CMAKE_SOURCE_DIR}/modules/zelda/ZeldaGUI.txt
+	${CMAKE_SOURCE_DIR}/modules/zelda/ZeldaSprite.txt
+	${CMAKE_SOURCE_DIR}/modules/zelda/ZeldaSubscreen.txt
+)
+
+set(ZQUEST_MODULES
+	${CMAKE_SOURCE_DIR}/modules/zquest/ZQuestCore.txt
+	${CMAKE_SOURCE_DIR}/modules/zquest/ZQuestGUI.txt
+	${CMAKE_SOURCE_DIR}/modules/zquest/ZQuestMisc.txt
+)
+
+set(ZSCRIPT_MODULES
+	${CMAKE_SOURCE_DIR}/modules/zscript/ParserCore.txt
+	${CMAKE_SOURCE_DIR}/modules/zscript/ParserSrc.txt
+)
+
+set(LAUNCHER_MODULES
+	${CMAKE_SOURCE_DIR}/modules/launcher/LauncherCore.txt
+	${CMAKE_SOURCE_DIR}/modules/launcher/LauncherGUI.txt
+)
+
+foreach(module ${ZELDA_MODULES} ${ZQUEST_MODULES} ${LAUNCHER_MODULES} ${ZSCRIPT_MODULES})
+	include(${module})
+	set_source_files_properties(${module} PROPERTIES HEADER_FILE_ONLY true)
+endforeach()
+
+#############################################################
+# Build the ZScript parser
+#############################################################
+
+find_package(BISON 3.0 QUIET)
+find_package(FLEX QUIET)
+
+if(${BISON_FOUND} AND ${FLEX_FOUND})
+	if(MSVC)
+		set(FLEXFLAGS "--wincompat")
+	endif()
+	FLEX_TARGET(ZScriptLexer ${CMAKE_SOURCE_DIR}/src/parser/ffscript.lpp ${CMAKE_SOURCE_DIR}/src/parser/lex.yy.cpp COMPILE_FLAGS ${FLEXFLAGS})
+	BISON_TARGET(ZScriptParser ${CMAKE_SOURCE_DIR}/src/parser/ffscript.ypp ${CMAKE_SOURCE_DIR}/src/parser/y.tab.cpp COMPILE_FLAGS -v)
+	add_flex_bison_dependency(ZScriptLexer ZScriptParser)
+else()
+	message(STATUS "Flex/Bison unavailable: script compiler omitted; gameplay core uses quest-embedded scripts.")
+endif()
+
+
+#############################################################
+# Global settings for the different platforms
+#############################################################
+
+
+# Windows
+
+if(WIN32)
+	# Prevents definition of min and max macros, which conflict with std::min and std::max
+	add_definitions(-DNOMINMAX)
+
+	string(REGEX MATCH "MSVC" CMAKE_COMPILER_IS_MSVC "${CMAKE_C_COMPILER_ID}")
+	if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19.20.2750.8)
+		message(FATAL_ERROR "MSVC version ${CMAKE_CXX_COMPILER_VERSION} is too old. Must use at least 2019 version 16.0.0")
+	endif()
+endif()
+
+if(MSVC)
+	# Turn off warnings for all targets that aren't ours (set later in Misc. section)
+	add_compile_options(/W0)
+
+	# Build in parallel - speeds up the build on multicore machines.
+	add_compile_options(/MP)
+
+	add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+	
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:LIBCD /SUBSYSTEM:WINDOWS /LARGEADDRESSAWARE /OPT:NOICF")
+	set(CMAKE_EXE_LINKER_FLAGS_DEBUG "/DEBUG")
+
+elseif(EMSCRIPTEN)
+	add_definitions(-DALLEGRO_LINUX) # Mistakenly used in the source.
+
+	add_compile_options("-m32")
+	# TODO: remove?
+	SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -m32 -static-libgcc -export-dynamic")
+	SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -m32 -static-libgcc")
+
+elseif(LINUX)
+	add_definitions(-DALLEGRO_LINUX) # Mistakenly used in the source.
+	add_definitions(-DALLEGRO_LEGACY_NO_FIX_ALIASES)
+
+	if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+		# SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -export-dynamic")
+		SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc")
+		SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -static-libgcc")
+	endif()
+endif()
+
+if(MSVC)
+	# REQUIRED or else MSVC throws internal compiler error(!)
+	add_compile_options("/fp:fast")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+	# TODO: GCC w/ these flags don't quite match the behavior of MSVC or clang, as seen in a replay report:
+	#    https://zc-replay-compare-3700187020.surge.sh/
+	# The difference is trivial (and isolated to just stuff re: Patras, or maybe Sin/Cos, unclear), and actually GCC
+	# looks more "correct". Should re-assess fp-rounding to guarentee same playback for any compiler; should either:
+	# 1) ignore some frames for purposes of replay assert
+	# 2) investigate more how to get exact same behavior from gcc
+	# 3) investigate removing the fp flags from all compilers and seeing if results can be made to be consistent;
+	#    would require a workaround for the MSVC internal compiler error mentioned above.
+	#
+	# In the meantime, we just use clang or msvc (never gcc) for replay tests (and for building release), which seems fine long term.
+
+	# https://stackoverflow.com/a/36502370/2788187
+	add_compile_options(-funsafe-math-optimizations -ffinite-math-only -fno-math-errno -fno-signaling-nans -fno-rounding-math -fcx-limited-range)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+	add_compile_options("-ffp-model=fast")
+endif()
+
+# Optimize the math functions always, even for debug mode. This reduces many inconsistencies with replays
+# in non-Release builds.
+if(MSVC)
+	# error D8016: '/O2' and '/RTC1' command-line options are incompatible
+	# set_source_files_properties(src/base/zc_math.cpp PROPERTIES COMPILE_FLAGS /O2)
+else()
+	# -O3 defines __OPTIMIZE__, which clang refuses to mix with a PCH built at a
+	# lower opt level (Asan/Debug). Skip the PCH for this one file.
+	set_source_files_properties(src/base/zc_math.cpp PROPERTIES COMPILE_FLAGS -O3 SKIP_PRECOMPILE_HEADERS ON)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+	add_compile_options(-mssse3)
+endif()
+
+get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(is_multi_config)
+	set(BUILD_FOLDER "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
+else()
+	set(BUILD_FOLDER "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+endif()
+
+#############################################################
+# Allegro Graphics Addons
+#############################################################
+
+add_library(alpng STATIC
+	third_party/al_loadpng/loadpng.c
+	third_party/al_loadpng/regpng.c
+	third_party/al_loadpng/savepng.c
+)
+target_link_libraries(alpng PUBLIC
+	allegro_with_legacy
+	PNG::PNG
+)
+target_include_directories(alpng PUBLIC
+	third_party/al_loadpng
+)
+list(APPEND IMAGELIBS alpng)
+
+add_library(algif STATIC
+	third_party/al_gif/src/save_gif.cpp
+	third_party/al_gif/src/load_gif.cpp
+)
+target_include_directories(algif PUBLIC
+	third_party/al_gif/include
+)
+target_link_libraries(algif PUBLIC allegro_with_legacy)
+list(APPEND IMAGELIBS algif)
+
+add_library(al5img STATIC
+	src/al5_img/src/al5_img.c
+)
+target_include_directories(al5img PUBLIC
+	src/al5_img/include
+)
+target_link_libraries(al5img PUBLIC allegro_with_legacy algif)
+list(APPEND IMAGELIBS al5img)
+
+#############################################################
+# Common libraries
+#############################################################
+
+set(zcbase_sources
+	src/base/about.cpp
+	src/base/autocombo.cpp
+	src/base/colors.cpp
+	src/base/combo.cpp
+	src/base/containers.cpp
+	src/base/cpool.cpp
+	src/base/cpos_info.cpp
+	src/base/dmap.cpp
+	src/base/files.cpp
+	src/base/fonts.cpp
+	src/base/general.cpp
+	src/base/gui.cpp
+	src/base/hotkey.cpp
+	src/base/initdata.cpp
+	src/base/jwinfsel.cpp
+	src/base/mapscr.cpp
+	src/base/misctypes.cpp
+	src/base/module.cpp
+	src/base/msgstr.cpp
+	src/base/new_menu.cpp
+	src/base/packfile.cpp
+	src/base/process_management.cpp
+	src/base/qrs.cpp
+	src/base/random.cpp
+	src/base/render.cpp
+	src/base/sin1.cpp
+	src/base/util.cpp
+	src/base/win32.cpp
+	src/base/check.cpp
+	src/base/version.cpp
+	src/base/zapp.cpp
+	src/base/zc_alleg.cpp
+	src/base/zc_math.cpp
+	src/base/zdefs.cpp
+	src/base/zfix.cpp
+	src/base/zsys.cpp
+)
+if (EMSCRIPTEN)
+    list(APPEND zcbase_sources src/base/emscripten_utils.cpp)
+endif()
+if (APPLE)
+    list(APPEND zcbase_sources src/base/zapp_osx.mm)
+endif()
+add_library(zcbase STATIC ${zcbase_sources})
+target_link_libraries(zcbase PUBLIC allegro_with_legacy fmt)
+target_include_directories(zcbase PUBLIC src third_party/nonstd/include)
+if(CURL_FOUND)
+	target_sources(zcbase PRIVATE src/base/http.cpp)
+	target_link_libraries(zcbase PUBLIC CURL::libcurl ${ZLIB_LIBRARIES})
+	target_compile_definitions(zcbase PUBLIC HAS_CURL)
+else()
+	message(WARNING "libcurl not found - disabling base/http.cpp")
+endif()
+if(NOT WIN32)
+	target_include_directories(zcbase PUBLIC include/pstream)
+endif()
+if (NOT EMSCRIPTEN)
+	target_link_libraries(zcbase PUBLIC nfd)
+	target_compile_definitions(zcbase PUBLIC HAS_NFD)
+	list(APPEND ZC_INSTALL_TARGETS nfd)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+	target_link_options(zcbase PRIVATE "/WHOLEARCHIVE")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+	target_link_options(zcbase PRIVATE "-force_load")
+endif()
+
+add_library(zcgui STATIC
+	src/gui/buildutil.cpp
+	src/gui/button.cpp
+	src/gui/checkbox_qr.cpp
+	src/gui/checkbox.cpp
+	src/gui/colorsel.cpp
+	src/gui/common.cpp
+	src/gui/ddpanel.cpp
+	src/gui/dialog_ref.cpp
+	src/gui/dialog_runner.cpp
+	src/gui/drop_down_list.cpp
+	src/gui/editbox.cpp
+	src/gui/EditboxModel.cpp
+	src/gui/EditboxView.cpp
+	src/gui/frame.cpp
+	src/gui/grid.cpp
+	src/gui/jwin_a5.cpp
+	src/gui/jwin.cpp
+	src/gui/label.cpp
+	src/gui/list_data.cpp
+	src/gui/list.cpp
+	src/gui/menu.cpp
+	src/gui/radio.cpp
+	src/gui/radioset.cpp
+	src/gui/scrolling_pane.cpp
+	src/gui/size.cpp
+	src/gui/switcher.cpp
+	src/gui/tabpanel.cpp
+	src/gui/tabref.cpp
+	src/gui/text_field.cpp
+	src/gui/top_level.cpp
+	src/gui/widget.cpp
+	src/gui/window.cpp
+	src/gui/slider.cpp
+	src/gui/ditherprev.cpp
+	src/gui/separator.cpp
+)
+target_link_libraries(zcgui PUBLIC allegro_with_legacy fmt)
+target_include_directories(zcgui PRIVATE src)
+
+#############################################################
+# ZConsole
+#############################################################
+
+if(WIN32)
+	add_executable(zconsole src/zconsole/ConsoleLoggerHelper.cpp)
+	target_link_options(zconsole PRIVATE "/SUBSYSTEM:CONSOLE")
+	list(APPEND ZC_INSTALL_TARGETS zconsole)
+endif()
+
+add_library(zconsolelogger STATIC src/zconsole/ConsoleLogger.cpp)
+target_link_libraries(zconsolelogger PUBLIC allegro_with_legacy zcbase)
+target_include_directories(zconsolelogger PUBLIC src)
+
+target_link_libraries(zcbase PUBLIC zconsolelogger)
+
+#############################################################
+# Sound Library
+#############################################################
+
+FetchContent_Declare(
+	gme_external
+	GIT_REPOSITORY https://github.com/libgme/game-music-emu
+	GIT_TAG        05a2aa29e8eae29316804fdd28ceaa96c74a1531
+	PATCH_COMMAND  git restore . && git apply ${CMAKE_SOURCE_DIR}/third_party/gme.patch
+	EXCLUDE_FROM_ALL
+)
+set(GME_YM2612_EMU "Nuked" CACHE STRING "Which YM2612 emulator to use: \"Nuked\" (LGPLv2.1+), \"MAME\" (GPLv2+), or \"GENS\" (LGPLv2.1+)")
+set(GME_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(gme_external)
+add_library(gme_headers INTERFACE)
+target_include_directories(gme_headers INTERFACE ${gme_external_SOURCE_DIR}/gme)
+target_link_libraries(gme_headers INTERFACE ${ZLIB_LIBRARIES})
+target_compile_definitions(gme_headers INTERFACE -DVGM_YM2612_NUKED)
+
+set(SOUNDLIBS gme gme_headers)
+list(APPEND ZC_INSTALL_TARGETS gme)
+
+if(MSVC AND (MSVC_VERSION GREATER 1600))
+	set(ZCSOUNDLIBSEXTRA legacy_stdio_definitions)
+endif()
+set(ZCSOUNDSOURCES
+	src/sound/zcmusic.cpp
+	src/sound/zcmixer.cpp
+)
+add_library(zcsound STATIC ${ZCSOUNDSOURCES})
+target_link_libraries(zcsound PUBLIC allegro_with_legacy zcbase ${SOUNDLIBS} ${ZCSOUNDLIBSEXTRA} allegro_audio allegro_acodec)
+
+target_compile_definitions(zcsound PRIVATE SOUND_LIBS_BUILT_FROM_SOURCE)
+
+#############################################################
+# Zelda
+#############################################################
+
+
+
+
+if(MSVC)
+	list(APPEND ZELDAEXTRASOURCES zc_icon.rc)
+
+elseif(LINUX)
+	list(APPEND ZELDAEXTRASOURCES zc_icon.c)
+endif()
+
+if(UNITY_BUILD)
+	enable_unity_build(ZeldaCore ZELDA_CORE_SOURCES)
+	enable_unity_build(ZeldaGUI ZELDA_GUI_SOURCES)
+	enable_unity_build(ZeldaSprite ZELDA_SPRITE_SOURCES)
+	enable_unity_build(ZeldaSubscreen ZELDA_SUBSCREEN_SOURCES)
+endif()
+
+add_library(zplayer SHARED ${ZELDA_CORE_SOURCES} ${ZELDA_GUI_SOURCES} ${ZELDA_SPRITE_SOURCES} ${ZELDA_SUBSCREEN_SOURCES} ${ZELDA_SCRIPTING_SOURCES} ${ZELDAEXTRASOURCES} ${ZELDA_MODULES})
+target_compile_definitions(zplayer PRIVATE IS_PLAYER)
+set_property(TARGET zplayer PROPERTY VS_DPI_AWARE "PerMonitor")
+target_include_directories(zplayer PRIVATE include/xxhash)
+target_link_libraries(zplayer PRIVATE allegro_with_legacy nlohmann_json::nlohmann_json)
+if (NOT EMSCRIPTEN)
+	target_link_libraries(zplayer PRIVATE stduuid)
+	target_compile_definitions(zplayer PRIVATE HAS_UUID)
+endif()
+if(CURL_FOUND)
+	target_sources(zplayer PRIVATE src/zc/replay_upload.cpp)
+else()
+	message(WARNING "libcurl not found - disabling zc/replay_upload.cpp")
+endif()
+
+if(WIN32)
+	target_link_libraries(zplayer PRIVATE zconsolelogger zcbase zcgui zcsound winmm ${IMAGELIBS} ${ZELDALIBSEXTRA})
+elseif(LINUX)
+	target_link_libraries(zplayer PRIVATE zconsolelogger zcbase zcgui zcsound ${IMAGELIBS} ${ZELDALIBSEXTRA})
+elseif(APPLE)
+	target_link_libraries(zplayer PRIVATE zconsolelogger zcbase zcgui zcsound ${IMAGELIBS} ${ZELDALIBSEXTRA})
+endif()
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+	FetchContent_Declare(
+		asmjit
+		GIT_REPOSITORY
+			https://github.com/connorjclark/asmjit.git
+		GIT_TAG
+			6d153ad8e13984841c2c642c0fa11e60f41e54dc
+		EXCLUDE_FROM_ALL
+	)
+	set(ASMJIT_STATIC ON CACHE BOOL "" FORCE)
+	FetchContent_MakeAvailable(asmjit)
+	target_link_libraries(zplayer PRIVATE asmjit)
+	target_compile_definitions(zplayer PRIVATE ZC_JIT)
+	list(APPEND ZC_INSTALL_TARGETS asmjit)
+
+	get_target_property(asm_compile_options asmjit COMPILE_OPTIONS)
+	string(REPLACE "$<NOT:$<CONFIG:Debug>>" "$<NOT:$<CONFIG:Debug,Asan>>" asm_compile_options "${asm_compile_options}")
+	set_target_properties(asmjit PROPERTIES COMPILE_OPTIONS "${asm_compile_options}")
+
+	target_sources(zplayer PUBLIC src/zc/jit_x64.cpp)
+endif()
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND WIN32)
+	target_compile_definitions(zplayer PRIVATE ZC_WIN_32)
+endif()
+
+#############################################################
+# ZQuest
+#############################################################
+
+if(MSVC)
+	list(APPEND ZQUESTEXTRASOURCES zq_icon.rc)
+elseif(LINUX)
+	list(APPEND ZQUESTEXTRASOURCES zq_icon.c)
+endif()
+
+if(UNITY_BUILD)
+	enable_unity_build(ZQuestCore ZQUEST_CORE_SOURCES)
+	enable_unity_build(ZQuestGUI ZQUEST_GUI_SOURCES)
+	enable_unity_build(ZQuestMisc ZQUEST_MISC_SOURCES)
+	enable_unity_build(ZQuestZScript PARSER_SOURCES)
+endif()
+
+add_executable(zeditor ${ZQUEST_CORE_SOURCES} ${ZQUEST_GUI_SOURCES} ${ZQUEST_MISC_SOURCES} ${ZQUESTEXTRASOURCES} ${ZQUEST_MODULES})
+set_property(TARGET zeditor PROPERTY VS_DPI_AWARE "PerMonitor")
+
+target_link_libraries(zeditor PUBLIC allegro_with_legacy zconsolelogger zcbase zcgui zcsound ${IMAGELIBS} ${ZQUESTLIBSEXTRA})
+target_include_directories(zeditor PRIVATE src)
+
+if(MSVC)
+endif()
+target_compile_definitions(zeditor PRIVATE IS_EDITOR)
+
+if(WIN32)
+	set_source_files_properties(
+		src/dialog/itemeditor.cpp
+		src/dialog/init_data.cpp
+		src/dialog/comboeditor.cpp
+		src/dialog/combowizard.cpp
+		src/dialog/subscr_props.cpp
+		src/parser/GlobalSymbols.cpp
+		PROPERTIES COMPILE_FLAGS "/bigobj"
+	)
+endif()
+
+#############################################################
+# ZScript parser
+#############################################################
+
+if(${BISON_FOUND} AND ${FLEX_FOUND})
+	add_executable(zscript ${ZSCRIPT_CORE_SOURCES} ${PARSER_SOURCES} ${BISON_ZScriptParser_OUTPUTS} ${FLEX_ZScriptLexer_OUTPUTS} ${ZSCRIPT_MODULES})
+	target_include_directories(zscript PRIVATE src)
+	target_link_libraries(zscript PRIVATE fmt zcbase zconsolelogger ${ZSCRIPTLIBSEXTRA})
+	target_compile_definitions(zscript PRIVATE IS_PARSER)
+endif()
+
+#############################################################
+# Launcher
+#############################################################
+
+if(MSVC)
+	list(APPEND LAUNCHEREXTRASOURCES zl_icon.rc)
+elseif(LINUX)
+	list(APPEND LAUNCHEREXTRASOURCES zl_icon.c)
+endif()
+
+add_executable(zlauncher ${LAUNCHER_SOURCES} ${LAUNCHER_GUI_SOURCES} ${LAUNCHEREXTRASOURCES})
+target_compile_definitions(zlauncher PRIVATE IS_LAUNCHER)
+set_property(TARGET zlauncher PROPERTY VS_DPI_AWARE "PerMonitor")
+target_link_libraries(zlauncher PRIVATE allegro_with_legacy zcbase zcgui zconsolelogger ${LAUNCHERLIBSEXTRA})
+
+#############################################################
+# Standalone
+#############################################################
+
+if(WIN32)
+	add_executable(zstandalone src/standalone/standalone.cpp)
+	target_link_options(zstandalone PRIVATE "/SUBSYSTEM:WINDOWS")
+	add_dependencies(zeditor zstandalone)
+	list(APPEND ZC_INSTALL_TARGETS zstandalone)
+endif()
+
+#############################################################
+# ZUpdater
+#############################################################
+
+if(WANT_ZUPDATER AND WIN32)
+	if(NOT CURL_FOUND)
+		message(WARNING "WANT_ZUPDATER is set, but could not find curl, so ignoring")
+	else()
+		set(BUILD_ZUPDATER TRUE)
+	endif()
+endif()
+
+if(BUILD_ZUPDATER)
+	# TODO give zupdater its own icon.
+	if(MSVC)
+		list(APPEND UPDATEREXTRASOURCES zl_icon.rc)
+	elseif(LINUX)
+		list(APPEND UPDATEREXTRASOURCES zl_icon.c)
+	endif()
+
+	add_library(json INTERFACE third_party/json/json/json.h)
+	target_include_directories(json INTERFACE third_party/json)
+
+	add_executable(zupdater src/zupdater/zupdater.cpp ${UPDATEREXTRASOURCES})
+	target_compile_definitions(zupdater PRIVATE ZUPDATER)
+	target_link_libraries(zupdater PRIVATE zcbase allegro_with_legacy CURL::libcurl json)
+	target_include_directories(zupdater PRIVATE src)
+	if(WIN32)
+		target_link_options(zupdater PRIVATE "/SUBSYSTEM:WINDOWS")
+	endif()
+
+	FetchContent_Declare(
+		miniz
+		GIT_REPOSITORY
+			https://github.com/richgel999/miniz.git
+		GIT_TAG
+			9ae305f6e109f8f1fbd2130458f1ee6197269b3b
+		EXCLUDE_FROM_ALL
+	)
+	set(BUILD_SHARED_LIBS_PREV ${BUILD_SHARED_LIBS})
+	set(BUILD_SHARED_LIBS OFF)
+	FetchContent_MakeAvailable(miniz)
+	set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_PREV} CACHE BOOL "" FORCE)
+	target_link_libraries(zupdater PRIVATE miniz)
+endif()
+
+#############################################################
+# Emscripten
+#############################################################
+
+if (EMSCRIPTEN)
+	target_link_options(zplayer PRIVATE "SHELL:-s EXPORTED_FUNCTIONS=_main,_get_shareable_url,_create_synthetic_key_event")
+	target_link_options(zeditor PRIVATE "SHELL:-s EXPORTED_FUNCTIONS=_main,_get_shareable_url,_create_synthetic_key_event,_open_test_mode")
+	target_link_options(zscript PRIVATE "SHELL:-s PTHREAD_POOL_SIZE=1" "SHELL:-s EXTRA_EXPORTED_RUNTIME_METHODS=['FS','PROXYFS']")
+	set_target_properties(zscript PROPERTIES SUFFIX ".mjs")
+endif()
+
+#############################################################
+# Misc.
+#############################################################
+
+set(zc_targets zeditor zplayer zlauncher zcbase zcgui zcsound zscript zconsolelogger)
+if(NOT TARGET zscript)
+  list(REMOVE_ITEM zc_targets zscript)
+endif()
+
+if(BUILD_ZUPDATER)
+	list(APPEND zc_targets zupdater)
+endif()
+
+set(zc_clang_errors
+	-Werror=array-bounds
+	-Werror=format
+	-Werror=inconsistent-missing-override
+	-Werror=return-type
+	-Werror=type-limits
+	-Werror=unreachable-code
+	# -Werror=reorder
+	# -Werror=unused
+	-Wno-write-strings
+	-Wno-switch
+)
+set(zc_gcc_errors
+	-Werror=array-bounds
+	-Werror=format
+	# GCC currently gives some false positives for format-overflow.
+	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=108091
+	-Wno-error=format-overflow
+	-Werror=return-type
+	-Werror=unreachable-code
+	# -Werror=unused
+	-Wno-write-strings
+	-Wno-switch
+	# TODO
+	# -Wunused-result
+)
+set(zc_msvc_errors
+	# /we5038
+	# /we4265
+)
+
+if(WANT_SENTRY)
+	set(SENTRY_VERSION 0.6.6)
+	FetchContent_Declare(sentry
+		URL https://github.com/getsentry/sentry-native/releases/download/${SENTRY_VERSION}/sentry-native.zip
+		EXCLUDE_FROM_ALL
+	)
+	set(SENTRY_BACKEND crashpad CACHE INTERNAL "")
+	set(SENTRY_BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
+	FetchContent_MakeAvailable(sentry)
+
+	foreach(target IN LISTS zc_targets)
+		target_link_libraries(${target} PRIVATE sentry)
+		target_compile_definitions(${target} PRIVATE HAS_SENTRY)
+	endforeach()
+
+	list(APPEND ZC_INSTALL_TARGETS crashpad_handler)
+endif()
+
+# See docs/versioning.md
+set(gen_version_header_deps scripts/generate_version_header.py)
+# Static upstream version_header.h is supplied; no repository metadata is read.
+
+if(RELEASE_TAG)
+	foreach(target IN LISTS zc_targets)
+		target_compile_definitions(${target} PRIVATE RELEASE_TAG="${RELEASE_TAG}")
+	endforeach()
+endif()
+
+if(RELEASE_PLATFORM)
+	foreach(target IN LISTS zc_targets)
+		target_compile_definitions(${target} PRIVATE RELEASE_PLATFORM="${RELEASE_PLATFORM}")
+	endforeach()
+endif()
+
+if(RELEASE_CHANNEL)
+	foreach(target IN LISTS zc_targets)
+		target_compile_definitions(${target} PRIVATE RELEASE_CHANNEL="${RELEASE_CHANNEL}")
+	endforeach()
+endif()
+
+if(REPO)
+	foreach(target IN LISTS zc_targets)
+		target_compile_definitions(${target} PRIVATE REPO="${REPO}")
+	endforeach()
+endif()
+
+if(WANT_FUZZ)
+	foreach(target IN LISTS zc_targets)
+		target_compile_definitions(${target} PRIVATE ZC_FUZZ)
+	endforeach()
+endif()
+
+if (WIN32)
+	list(APPEND zc_targets zconsole zstandalone)
+	# No console helper is required by the hosted core.
+endif()
+
+if (MSVC)
+	foreach(target IN LISTS zc_targets)
+		# Yes MSVC, we want C++ 20 features. https://devblogs.microsoft.com/cppblog/announcing-full-support-for-a-c-c-conformant-preprocessor-in-msvc/
+		target_compile_options(${target} PRIVATE /Zc:preprocessor)
+	endforeach()
+endif()
+
+if(USE_PCH)
+	foreach(target IN LISTS zc_targets)
+		target_precompile_headers(${target}
+			PRIVATE
+				[["base/zc_alleg.h"]]
+				<cassert>
+				<cctype>
+				<cmath>
+				<cstdarg>
+				<cstdint>
+				<cstdio>
+				<cstdlib>
+				<cstring>
+				<map>
+				<set>
+				<string>
+				<vector>
+		)
+	endforeach()
+endif()
+
+foreach(target IN LISTS zc_targets)
+	if(MSVC)
+		target_compile_definitions(${target} PRIVATE __STDC_LIMIT_MACROS)
+		if(WANT_ERROR_CHECKING)
+			# TODO: set /W2 higher.
+			target_compile_options(${target} PRIVATE /W2 /WX ${zc_msvc_errors})
+		endif()
+	endif()
+
+	if(WANT_ERROR_CHECKING AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT EMSCRIPTEN)
+		target_compile_options(${target} PRIVATE -Wall)
+		# Uncomment to autofix. Only works for clang. When done, comment this line out again.
+		# target_compile_options(${target} PRIVATE -ferror-limit=10000 -Wno-everything ${zc_clang_errors} "SHELL:-Xclang -fix-what-you-can" "SHELL:-Xclang -fixit-recompile")
+		target_compile_options(${target} PRIVATE ${zc_clang_errors})
+	endif()
+	if(WANT_ERROR_CHECKING AND CMAKE_C_COMPILER_ID MATCHES "GNU")
+		target_compile_options(${target} PRIVATE -Wall ${zc_gcc_errors})
+	endif()
+endforeach()
+
+# Disable warnings for generated file.
+if(WIN32)
+	set_source_files_properties(src/parser/lex.yy.cpp PROPERTIES COMPILE_FLAGS /W0)
+else()
+	set_source_files_properties(src/parser/lex.yy.cpp PROPERTIES COMPILE_FLAGS -Wno-everything)
+endif()
+
+# Add some targets for running replay tests.
+# TODO: Visual Studio can't cancel custom commands from CMake
+# https://gitlab.kitware.com/cmake/cmake/-/issues/25183
+# https://stackoverflow.com/q/43364914
+function (create_replay_tests_target target_name)
+	list(SUBLIST ARGV 1 -1 command_args)
+	add_custom_command(
+		USES_TERMINAL
+		COMMAND ${PYTHON} -Xutf8 ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_replay_tests.py --no-emoji --build_folder "${BUILD_FOLDER}" ${command_args}
+		OUTPUT ${target_name}.stamp
+		DEPENDS zelda
+	)
+	add_custom_target(${target_name} DEPENDS ${target_name}.stamp)
+	set_source_files_properties(${target_name}.stamp PROPERTIES SYMBOLIC 1)
+endfunction()
+
+# Run everything.
+create_replay_tests_target(run_replay_tests_all --assert)
+# Run just the short ones.
+create_replay_tests_target(run_replay_tests_basic --assert --filter playground --filter classic_1st.zplay --filter dark)
+# Don't use jit, just because there is lots of overhead to compilation that will make it a waste when
+# running just a few seconds.
+create_replay_tests_target(run_replay_tests_all_1s --assert --no-jit --max_duration 1)
+create_replay_tests_target(run_replay_tests_all_10s --assert --no-jit --max_duration 10)
+create_replay_tests_target(run_replay_tests_all_100s --assert --no-jit --max_duration 100)
+
+if(EMSCRIPTEN)
+	add_subdirectory(web)
+endif()
+
+# Standalone core packages are assembled separately.
+
+#############################################################
+# Visual Studio
+#############################################################
+
+if(CMAKE_GENERATOR MATCHES "Visual Studio")
+	# "Edit and Continue" functionality
+	set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /ZI")
+	set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /SAFESEH:NO")
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SAFESEH:NO")
+
+	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT zeditor)
+
+	# Configure "Debug" option in VS to use the correct working directory, otherwise it fails to load zc configuration files
+	set_property(TARGET ${zc_targets} PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)$(Configuration)")
+
+	# Organize into folders
+	set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+	set_target_properties(zplayer zeditor zscript zlauncher package_zc PROPERTIES FOLDER "")
+	if(BUILD_ZUPDATER)
+		set_target_properties(zupdater package_zc PROPERTIES FOLDER "")
+	endif()
+	set_target_properties(run_replay_tests_all run_replay_tests_basic run_replay_tests_all_1s run_replay_tests_all_10s run_replay_tests_all_100s PROPERTIES FOLDER "Replay Tests")
+	set_target_properties(zcbase zcgui zcsound PROPERTIES FOLDER "Our Libraries")
+	set_target_properties(gme PROPERTIES FOLDER Sound)
+	set_target_properties(allegro allegro_audio allegro_acodec allegro_image allegro_font allegro_main allegro_primitives allegro_dialog allegro-legacy al5img algif alpng PROPERTIES FOLDER Allegro)
+	set_target_properties(zconsole zconsolelogger PROPERTIES FOLDER ZConsole)
+	if(WANT_SENTRY)
+		set_target_properties(crashpad_client crashpad_compat crashpad_getopt crashpad_handler crashpad_handler_lib crashpad_minidump crashpad_snapshot crashpad_tools crashpad_util crashpad_zlib mini_chromium sentry PROPERTIES FOLDER Sentry)
+	endif()
+
+	# Put everything else in "Other" folder
+	function(get_all_targets var)
+		set(targets)
+		get_all_targets_recursive(targets ${CMAKE_CURRENT_SOURCE_DIR})
+		set(${var} ${targets} PARENT_SCOPE)
+	endfunction()
+
+	macro(get_all_targets_recursive targets dir)
+		get_property(subdirectories DIRECTORY ${dir} PROPERTY SUBDIRECTORIES)
+		foreach(subdir ${subdirectories})
+			get_all_targets_recursive(${targets} ${subdir})
+		endforeach()
+
+		get_property(current_targets DIRECTORY ${dir} PROPERTY BUILDSYSTEM_TARGETS)
+		list(APPEND ${targets} ${current_targets})
+	endmacro()
+
+	get_all_targets(all_targets)
+	foreach(target IN LISTS all_targets)
+		get_property(folder_set TARGET ${target} PROPERTY FOLDER SET)
+		if(NOT folder_set)
+			set_target_properties(${target} PROPERTIES FOLDER Other)
+		endif()
+	endforeach()
+
+	# The sound system has a known memory issue, so for now set the default debugging args to disable sound.
+	set_property(TARGET ${zc_targets} PROPERTY VS_DEBUGGER_COMMAND_ARGUMENTS "$<$<CONFIG:ASAN>:-s>")
+endif()
+
+# Without this, the ASAN config on Windows won't place libcurl/zlib dlls in the right place.
+if(CURL_FOUND AND WIN32 AND (DEFINED VCPKG_TOOLCHAIN_FILE OR DEFINED VCPKG_TARGET_TRIPLET))
+	# Figure out where vcpkg put the debug dlls.
+	get_target_property(CURL_DEBUG_DLL CURL::libcurl IMPORTED_LOCATION_DEBUG)
+
+	# If the property returns the .lib (common on Windows), we need to swap extensions
+	# or just assume the standard vcpkg layout.
+	# Standard vcpkg layout is safest:
+	get_filename_component(VCPKG_DEBUG_BIN_DIR "${CURL_DEBUG_DLL}" DIRECTORY)
+
+	# Add a manual copy command for the Asan config.
+	foreach(target ${zc_targets})
+		add_custom_command(TARGET ${target} POST_BUILD
+			COMMAND $<$<CONFIG:Asan>:${CMAKE_COMMAND}> -E copy_if_different
+				"${VCPKG_DEBUG_BIN_DIR}/libcurl-d.dll"
+				"${VCPKG_DEBUG_BIN_DIR}/zlibd1.dll"
+				"$<TARGET_FILE_DIR:zplayer>"
+			COMMENT "Manually copying vcpkg Debug DLLs for Asan build"
+		)
+	endforeach()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/Standalone.cmake")

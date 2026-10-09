@@ -1,0 +1,1199 @@
+#include "player_bridge.h"
+#include "snapshot_ui_runtime.h"
+#include <cstring>
+
+#include "base/qrs.h"
+#include "base/dmap.h"
+#include "base/util.h"
+#include "base/zdefs.h"
+#include "zc/maps.h"
+#include "zc/zelda.h"
+#include "subscr.h"
+#include "zc/zc_subscr.h"
+#include "zc/hero.h"
+#include "gamedata.h"
+#include "zc/guys.h"
+#include "zc/ffscript.h"
+#include "zc/replay.h"
+#include "base/mapscr.h"
+#include "base/misctypes.h"
+
+extern HeroClass Hero;
+extern FFScript FFCore;
+extern int32_t directItemA;
+extern int32_t directItemB;
+extern int32_t directItemY;
+extern int32_t directItemX;
+
+//DIALOG *sso_properties_dlg;
+
+static bool opening_subscr_show_bottom_8px;
+
+void put_active_subscr(int32_t y, int32_t pos)
+{
+	// Active subscreens do not yet get to use those 8 extra pixels. Until then,
+	// draw 8 black pixels at the top (as the active subscreen will move an additional
+	// 8 pixels and so must obscure the playing field somehow).
+	if (opening_subscr_show_bottom_8px && get_qr(qr_ACTIVE_SUB_IGNORE_8PX))
+	{
+		rectfill(framebuf, 0, y, framebuf->w, y+8-1, BLACK);
+		y += 8;
+	}
+    show_custom_subscreen(framebuf, new_subscreen_active, 0, y, game->should_show_time(), pos);
+}
+
+void draw_subscrs(BITMAP* dest, int x, int y, bool showtime, int pos)
+{
+	int distance = opening_subscr_show_bottom_8px ? 176 : 168;
+	if(get_qr(qr_OLD_SUBSCR))
+	{
+		put_passive_subscr(dest,x,y+distance,showtime,pos);
+		put_active_subscr(y,pos);
+	}
+	else
+	{
+		put_active_subscr(y,pos);
+		put_passive_subscr(dest,x,y+distance,showtime,pos);
+	}
+}
+
+ZC255UiRuntime zc255_ui_runtime;
+void zc255_ui_request() {if(!zc255_ui_runtime.phase)zc255_ui_runtime.phase=1;}
+bool zc255_ui_active() {return zc255_ui_runtime.phase!=0;}
+static void zc255_ui_finish() {
+
+	auto& r=zc255_ui_runtime;
+	auto& temppal=r.temppal;
+	auto& showtime=r.showtime;
+	auto& use_a=r.use_a;
+	auto& use_x=r.use_x;
+	auto& use_y=r.use_y;
+	auto& b_only=r.b_only;
+	auto& compat=r.compat;
+	auto& noverify=r.noverify;
+	auto& distance=r.distance;
+	auto& offy=r.offy;
+	auto& done=r.done;
+	auto& legacy_btn_press_peek=r.legacy_btn_press_peek;
+	auto& y=r.y;
+
+	active_sub_yoff = -224;
+	subscreen_open = false;
+	updateShowBottomPixels(); // might have changed.
+	if(r.saved_bombpal)
+	{
+		memcpy(RAMpal, temppal, PAL_SIZE*sizeof(RGB));
+	}
+	
+	resume_sfx(WAV_BRANG);
+
+	FFCore.clear_script_engine_data(ScriptType::EngineSubscreen,0);
+	script_drawing_commands.Clear();
+	FFCore.skipscriptdraws=r.saved_skipdraws;r.phase=0;
+}
+static void zc255_ui_begin() {
+
+	auto& r=zc255_ui_runtime;
+	auto& temppal=r.temppal;
+	auto& showtime=r.showtime;
+	auto& use_a=r.use_a;
+	auto& use_x=r.use_x;
+	auto& use_y=r.use_y;
+	auto& b_only=r.b_only;
+	auto& compat=r.compat;
+	auto& noverify=r.noverify;
+	auto& distance=r.distance;
+	auto& offy=r.offy;
+	auto& done=r.done;
+	auto& legacy_btn_press_peek=r.legacy_btn_press_peek;
+	auto& y=r.y;
+
+	
+	if (no_subscreen() || !new_subscreen_active) {r.phase=0;return;}
+	
+	if((r.saved_bombpal=usebombpal))
+	{
+		memcpy(temppal, RAMpal, PAL_SIZE*sizeof(RGB));
+		memcpy(RAMpal, tempbombpal, PAL_SIZE*sizeof(RGB));
+		refreshpal=true;
+	}
+	
+	showtime = game->should_show_time();
+	if(replay_version_check(0,19))
+		refresh_subscr_items();
+	else flushItemCache();
+	
+	pause_sfx(WAV_BRANG);
+	
+	if(current_item_id(itype_brang)>=0)
+		pause_sfx(itemsbuf[current_item_id(itype_brang)].usesound);
+		
+	if(current_item_id(itype_hookshot)>=0)
+		pause_sfx(itemsbuf[current_item_id(itype_hookshot)].usesound);
+		
+	adjust_sfx(QMisc.miscsfx[sfxLOWHEART],128,false);
+	adjust_sfx(QMisc.miscsfx[sfxREFILL],128,false);
+	adjust_sfx(QMisc.miscsfx[sfxDRAIN],128,false);
+	
+	set_clip_rect(scrollbuf, 0, 0, scrollbuf->w, scrollbuf->h);
+	set_clip_rect(framebuf, 0, 0, framebuf->w, framebuf->h);
+
+	// Copy the complete frame.
+	// Capture the screen as displayed, so presentation-only effects (the
+	// wavy distortion) stay baked into the frozen background while the
+	// subscreen is up.
+	blit(latest_screen_image(),scrollbuf,0,playing_field_offset,0,0,256,176);
+	
+	use_a = get_qr(qr_SELECTAWPN), use_x = get_qr(qr_SET_XBUTTON_ITEMS),
+		 use_y = get_qr(qr_SET_YBUTTON_ITEMS);
+	b_only = !(use_a||use_x||use_y||get_qr(qr_SUBSCR_PRESS_TO_EQUIP));
+	//Set the selector to the correct position before bringing up the subscreen -DD
+	if(!new_subscreen_active) return;
+	compat = get_qr(qr_OLD_SUBSCR);
+	noverify = get_qr(qr_NO_BUTTON_VERIFY);
+	if(compat)
+	{
+		new_subscreen_active->curpage = 0;
+		auto& pg = new_subscreen_active->pages[0];
+		if((game->bwpn&0xFF) == 0)
+			pg.cursor_pos = game->bwpn>>8;
+		else if((game->awpn&0xFF) == 0)
+			pg.cursor_pos = game->awpn>>8;
+		else if((game->xwpn&0xFF) == 0)
+			pg.cursor_pos = game->xwpn>>8;
+		else if((game->ywpn&0xFF) == 0)
+			pg.cursor_pos = game->ywpn>>8;
+		else pg.cursor_pos = 0;
+	}
+
+	opening_subscr_show_bottom_8px = show_bottom_8px;
+
+	distance = opening_subscr_show_bottom_8px ? 176 : 168;
+	offy = passive_subscreen_height;
+
+	FFCore.initZScriptSubscreenScript();
+
+	subscrpg_clear_animation();
+	subscreen_open = true;
+	
+	r.opening_bottom=opening_subscr_show_bottom_8px;
+	r.saved_skipdraws=FFCore.skipscriptdraws;FFCore.skipscriptdraws=false;
+	y=-distance;r.phase=2;
+}
+void zc255_ui_step() {
+
+	auto& r=zc255_ui_runtime;
+	auto& temppal=r.temppal;
+	auto& showtime=r.showtime;
+	auto& use_a=r.use_a;
+	auto& use_x=r.use_x;
+	auto& use_y=r.use_y;
+	auto& b_only=r.b_only;
+	auto& compat=r.compat;
+	auto& noverify=r.noverify;
+	auto& distance=r.distance;
+	auto& offy=r.offy;
+	auto& done=r.done;
+	auto& legacy_btn_press_peek=r.legacy_btn_press_peek;
+	auto& y=r.y;
+
+    if(r.phase==1) zc255_ui_begin();
+    if(!r.phase)return;
+    opening_subscr_show_bottom_8px=r.opening_bottom;
+    if(r.phase==2) {
+
+		if(replay_version_check(19))
+		{
+			load_control_state();
+			script_drawing_commands.Clear();
+		}
+		active_sub_yoff = y-playing_field_offset;
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0))
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+		do_dcounters();
+		Hero.refill();
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0) && FFCore.waitdraw(ScriptType::EngineSubscreen,0))
+		{
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+			FFCore.waitdraw(ScriptType::EngineSubscreen,0) = false;
+		}
+		//fill in the screen with black to prevent the hall of mirrors effect
+		clear_to_color(framebuf, 0);
+
+		// With COOLSCROLL on, the subscreen crawls down over the playing field.
+		// Otherwise the playing field scrolls down past the bottom of the screen.
+		if(COOLSCROLL)
+		{
+			blit(scrollbuf,framebuf,0,0,0,passive_subscreen_height,256,176);
+		}
+		else
+		{
+			blit(scrollbuf,framebuf,0,0,0,y+distance+passive_subscreen_height,256,-y+(opening_subscr_show_bottom_8px?8:0));
+		}
+		
+		draw_subscrs(framebuf,0,y,showtime,sspSCROLLING);
+		if(replay_version_check(19))
+			do_script_draws(framebuf, tmpscr, 0, playing_field_offset);
+		
+		advanceframe(false);
+		
+		if(Quit) {zc255_ui_finish();return;}
+	
+        y+=3*Hero.subscr_speed;
+        if(y>0) {
+
+	active_sub_yoff = -playing_field_offset;
+	done=false;
+
+	// Consume whatever input was registered during opening animation.
+	if (replay_version_check(18))
+		load_control_state();
+
+	legacy_btn_press_peek = false;
+	if (replay_is_active())
+	{
+		std::string qst = replay_get_meta_str("qst");
+		legacy_btn_press_peek |= qst == "demosp253.qst";
+		legacy_btn_press_peek |= qst == "first_quest_layered.qst";
+		legacy_btn_press_peek |= qst == "hell_awaits.qst";
+	}
+
+            r.phase=3;
+        }
+        return;
+    }
+    if(r.phase==3) {
+
+		if (replay_version_check(0, 11))
+			load_control_state();
+		if(replay_version_check(19))
+			script_drawing_commands.Clear();
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0))
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+		auto pgnum = new_subscreen_active->curpage;
+		auto& pg = new_subscreen_active->cur_page();
+		bool can_btn = !subscr_pg_animating;
+		if(can_btn)
+		{
+			byte btn_press = getIntBtnInput(0xFF, true, false, false, false, legacy_btn_press_peek);
+			int32_t pos = pg.cursor_pos;
+			
+			if(rUp())         pg.move_cursor(SEL_UP);
+			else if(rDown())  pg.move_cursor(SEL_DOWN);
+			else if(rLeft())  pg.move_cursor(SEL_LEFT);
+			else if(rRight()) pg.move_cursor(SEL_RIGHT);
+			else if(compat)
+			{
+				if(rLbtn())
+				{
+					if (!get_qr(qr_NO_L_R_BUTTON_INVENTORY_SWAP))
+					{
+						pg.cursor_pos = pg.movepos_legacy(SEL_LEFT, (pos<<8)|pg.getIndex(), 255, 255, 255, false, true)>>8;
+					}
+				}
+				else if(rRbtn() )
+				{
+					if (!get_qr(qr_NO_L_R_BUTTON_INVENTORY_SWAP)) 
+					{
+						pg.cursor_pos = pg.movepos_legacy(SEL_RIGHT, (pos<<8)|pg.getIndex(), 255, 255, 255, false, true)>>8;
+					}
+				}
+				else if(rEx3btn() )
+				{
+					if ( use_a && get_qr(qr_USE_EX1_EX2_INVENTORYSWAP) )
+					{
+						selectNextAWpn(SEL_LEFT);
+					}
+				}
+				else if(rEx4btn() )
+				{
+					if ( use_a && get_qr(qr_USE_EX1_EX2_INVENTORYSWAP) )
+					{
+						selectNextAWpn(SEL_RIGHT);
+					}
+				}
+			}
+			
+			if(pos!=pg.cursor_pos)
+				sfx(QMisc.miscsfx[sfxSUBSCR_CURSOR_MOVE]);
+			
+			SubscrWidget* widg = pg.get_sel_widg();
+			
+			if(widg)
+			{
+				bool can_interact = true, can_equip = true,
+					must_equip = false, can_unequip = noverify;
+				auto eqwpn = widg->getItemVal();
+				if(widg->getType() == widgITEMSLOT)
+				{
+					if((widg->flags & SUBSCR_CURITM_NO_INTER_WO_ITEM)
+						&& widg->getDisplayItem() < 0)
+						can_interact = false;
+					if(widg->flags & SUBSCR_CURITM_NONEQP)
+						can_equip = false;
+					if(widg->flags & SUBSCR_CURITM_NO_UNEQUIP)
+						can_unequip = false;
+					must_equip = !b_only && (widg->flags & SUBSCR_CURITM_NO_INTER_WO_EQUIP);
+				}
+				if(must_equip && (!can_equip || eqwpn < 0))
+					can_interact = false;
+				
+				if(can_interact)
+				{
+					auto bpress = btn_press;
+					if(must_equip)
+					{
+						bpress &= ((!can_unequip || Bwpn!=eqwpn) ? INT_BTN_B : 0)
+							| ((use_a && (!can_unequip || Awpn!=eqwpn)) ? INT_BTN_A : 0)
+							| ((use_x && (!can_unequip || Xwpn!=eqwpn)) ? INT_BTN_X : 0)
+							| ((use_y && (!can_unequip || Ywpn!=eqwpn)) ? INT_BTN_Y : 0);
+					}
+					if(widg->generic_script && (bpress&widg->gen_script_btns))
+					{
+						FFCore.runGenericFrozenEngine(widg->generic_script, widg->generic_initd);
+						eqwpn = widg->getItemVal(); //update incase script changed
+						if(must_equip) //update values depending on eqwpn
+						{
+							bpress = btn_press;
+							bpress &= (Bwpn!=eqwpn ? INT_BTN_B : 0)
+								| ((use_a && Awpn!=eqwpn) ? INT_BTN_A : 0)
+								| ((use_x && Xwpn!=eqwpn) ? INT_BTN_X : 0)
+								| ((use_y && Ywpn!=eqwpn) ? INT_BTN_Y : 0);
+						}
+					}
+					
+					if(can_equip)
+					{
+						if(eqwpn > -1)
+						{
+							if(b_only || (btn_press&INT_BTN_B))
+							{
+								if(can_unequip && !b_only && eqwpn == Bwpn)
+								{
+									Bwpn = -1;
+									game->forced_bwpn = -1;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									
+									game->bwpn = 255;
+									directItemB = -1;
+								}
+								else
+								{
+									if(use_a && eqwpn == Awpn)
+									{
+										Awpn = Bwpn;
+										game->awpn = game->bwpn;
+										directItemA = directItemB;
+									}
+									else if(use_x && eqwpn == Xwpn)
+									{
+										Xwpn = Bwpn;
+										game->xwpn = game->bwpn;
+										directItemX = directItemB;
+									}
+									else if(use_y && eqwpn == Ywpn)
+									{
+										Ywpn = Bwpn;
+										game->ywpn = game->bwpn;
+										directItemY = directItemB;
+									}
+									
+									Bwpn = eqwpn;
+									game->forced_bwpn = -1; //clear forced if the item is selected using the actual subscreen
+									if(!b_only) sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									game->bwpn = ((pg.cursor_pos)<<8) | new_subscreen_active->curpage;
+									directItemB = NEG_OR_MASK(eqwpn,0xFF);
+								}
+							}
+							else if(use_a && (btn_press&INT_BTN_A))
+							{
+								if(can_unequip && eqwpn == Awpn)
+								{
+									Awpn = -1;
+									game->forced_awpn = -1;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									
+									game->awpn = 255;
+									directItemA = -1;
+								}
+								else
+								{
+									if(eqwpn == Bwpn)
+									{
+										Bwpn = Awpn;
+										game->bwpn = game->awpn;
+										directItemB = directItemA;
+									}
+									else if(use_x && eqwpn == Xwpn)
+									{
+										Xwpn = Awpn;
+										game->xwpn = game->awpn;
+										directItemX = directItemA;
+									}
+									else if(use_y && eqwpn == Ywpn)
+									{
+										Ywpn = Awpn;
+										game->ywpn = game->awpn;
+										directItemY = directItemA;
+									}
+									
+									Awpn = eqwpn;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									game->awpn = ((pg.cursor_pos)<<8) | new_subscreen_active->curpage;
+									game->forced_awpn = -1; //clear forced if the item is selected using the actual subscreen
+									directItemA = NEG_OR_MASK(eqwpn,0xFF);
+								}
+							}
+							else if(use_x && (btn_press&INT_BTN_EX1))
+							{
+								if(can_unequip && eqwpn == Xwpn)
+								{
+									Xwpn = -1;
+									game->forced_xwpn = -1;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									
+									game->xwpn = 255;
+									directItemX = -1;
+								}
+								else
+								{
+									if(eqwpn == Bwpn)
+									{
+										Bwpn = Xwpn;
+										game->bwpn = game->xwpn;
+										directItemB = directItemX;
+									}
+									else if(use_a && eqwpn == Awpn)
+									{
+										Awpn = Xwpn;
+										game->awpn = game->xwpn;
+										directItemA = directItemX;
+									}
+									else if(use_y && eqwpn == Ywpn)
+									{
+										Ywpn = Xwpn;
+										game->ywpn = game->xwpn;
+										directItemY = directItemX;
+									}
+									
+									Xwpn = eqwpn;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									game->xwpn = ((pg.cursor_pos)<<8) | new_subscreen_active->curpage;
+									game->forced_xwpn = -1; //clear forced if the item is selected using the actual subscreen
+									directItemX = NEG_OR_MASK(eqwpn,0xFF);
+								}
+							}
+							else if(use_y && (btn_press&INT_BTN_EX2))
+							{
+								if(can_unequip && eqwpn == Ywpn)
+								{
+									Ywpn = -1;
+									game->forced_ywpn = -1;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									
+									game->ywpn = 255;
+									directItemY = -1;
+								}
+								else
+								{
+									if(eqwpn == Bwpn)
+									{
+										Bwpn = Ywpn;
+										game->bwpn = game->ywpn;
+										directItemB = directItemY;
+									}
+									else if(use_a && eqwpn == Awpn)
+									{
+										Awpn = Ywpn;
+										game->awpn = game->ywpn;
+										directItemA = directItemY;
+									}
+									else if(use_x && eqwpn == Xwpn)
+									{
+										Xwpn = Ywpn;
+										game->xwpn = game->ywpn;
+										directItemX = directItemY;
+									}
+									
+									Ywpn = eqwpn;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									game->ywpn = ((pg.cursor_pos)<<8) | new_subscreen_active->curpage;
+									game->forced_ywpn = -1; //clear forced if the item is selected using the actual subscreen
+									directItemY = NEG_OR_MASK(eqwpn,0xFF);
+								}
+							}
+						}
+					}
+					if(!must_equip || eqwpn > -1)
+						widg->check_btns(bpress,*new_subscreen_active);
+				}
+			}
+			if(new_subscreen_active->curpage == pgnum)
+				new_subscreen_active->check_btns(btn_press);
+		}
+		
+		do_dcounters();
+		Hero.refill();
+		
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0) && FFCore.waitdraw(ScriptType::EngineSubscreen,0))
+		{
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+			FFCore.waitdraw(ScriptType::EngineSubscreen,0) = false;
+		}
+
+		clear_to_color(framebuf, 0);
+
+		if(COOLSCROLL) //copy the playing field back onto the screen
+			blit(scrollbuf,framebuf,0,0,0,passive_subscreen_height,256,176);
+		//else nothing to do; the playing field has scrolled off the screen
+		
+		//draw the passive and active subscreen
+		draw_subscrs(framebuf,0,0,showtime,sspDOWN);
+		if(replay_version_check(19))
+			do_script_draws(framebuf, tmpscr, 0, playing_field_offset);
+		
+		advanceframe(false);
+		if (replay_version_check(11))
+			load_control_state();
+		
+		if(can_btn && NESquit && Up() && cAbtn() && cBbtn())
+		{
+			down_control_states[btnUp] = true;
+			Quit=qQUIT;
+		}
+		
+		if(Quit) {zc255_ui_finish();return;}
+			
+		if(can_btn && rSbtn())
+			done=true;
+	
+        if(done){subscrpg_clear_animation();y=0;r.phase=4;}
+        return;
+    }
+    if(r.phase==4) {
+
+		if(replay_version_check(19))
+		{
+			load_control_state();
+			script_drawing_commands.Clear();
+		}
+		active_sub_yoff = y-playing_field_offset;
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0))
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+		do_dcounters();
+		Hero.refill();
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0) && FFCore.waitdraw(ScriptType::EngineSubscreen,0))
+		{
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+			FFCore.waitdraw(ScriptType::EngineSubscreen,0) = false;
+		}
+		//fill in the screen with black to prevent the hall of mirrors effect
+		clear_to_color(framebuf, 0);
+		
+		if(COOLSCROLL)
+		{
+			blit(scrollbuf,framebuf,0,0,0,passive_subscreen_height,256,176);
+		}
+		else
+		{
+			blit(scrollbuf,framebuf,0,0,0,y+distance+passive_subscreen_height,256,-y+(opening_subscr_show_bottom_8px?8:0));
+		}
+		
+		draw_subscrs(framebuf,0,y,showtime,sspSCROLLING);
+		if(replay_version_check(19))
+			do_script_draws(framebuf, tmpscr, 0, playing_field_offset);
+		advanceframe(false);
+		
+		if(Quit) {zc255_ui_finish();return;}
+	
+        y-=3*Hero.subscr_speed;
+        if(y< -distance)zc255_ui_finish();
+        return;
+    }
+}
+
+static void _dosubscr()
+{
+	PALETTE temppal;
+	
+	if (no_subscreen())
+		return;
+	
+	if(usebombpal)
+	{
+		memcpy(temppal, RAMpal, PAL_SIZE*sizeof(RGB));
+		memcpy(RAMpal, tempbombpal, PAL_SIZE*sizeof(RGB));
+		refreshpal=true;
+	}
+	
+	bool showtime = game->should_show_time();
+	if(replay_version_check(0,19))
+		refresh_subscr_items();
+	else flushItemCache();
+	
+	pause_sfx(WAV_BRANG);
+	
+	if(current_item_id(itype_brang)>=0)
+		pause_sfx(itemsbuf[current_item_id(itype_brang)].usesound);
+		
+	if(current_item_id(itype_hookshot)>=0)
+		pause_sfx(itemsbuf[current_item_id(itype_hookshot)].usesound);
+		
+	adjust_sfx(QMisc.miscsfx[sfxLOWHEART],128,false);
+	adjust_sfx(QMisc.miscsfx[sfxREFILL],128,false);
+	adjust_sfx(QMisc.miscsfx[sfxDRAIN],128,false);
+	
+	set_clip_rect(scrollbuf, 0, 0, scrollbuf->w, scrollbuf->h);
+	set_clip_rect(framebuf, 0, 0, framebuf->w, framebuf->h);
+
+	// Copy the complete frame.
+	// Capture the screen as displayed, so presentation-only effects (the
+	// wavy distortion) stay baked into the frozen background while the
+	// subscreen is up.
+	blit(latest_screen_image(),scrollbuf,0,playing_field_offset,0,0,256,176);
+	
+	bool use_a = get_qr(qr_SELECTAWPN), use_x = get_qr(qr_SET_XBUTTON_ITEMS),
+		 use_y = get_qr(qr_SET_YBUTTON_ITEMS);
+	bool b_only = !(use_a||use_x||use_y||get_qr(qr_SUBSCR_PRESS_TO_EQUIP));
+	//Set the selector to the correct position before bringing up the subscreen -DD
+	if(!new_subscreen_active) return;
+	bool compat = get_qr(qr_OLD_SUBSCR);
+	bool noverify = get_qr(qr_NO_BUTTON_VERIFY);
+	if(compat)
+	{
+		new_subscreen_active->curpage = 0;
+		auto& pg = new_subscreen_active->pages[0];
+		if((game->bwpn&0xFF) == 0)
+			pg.cursor_pos = game->bwpn>>8;
+		else if((game->awpn&0xFF) == 0)
+			pg.cursor_pos = game->awpn>>8;
+		else if((game->xwpn&0xFF) == 0)
+			pg.cursor_pos = game->xwpn>>8;
+		else if((game->ywpn&0xFF) == 0)
+			pg.cursor_pos = game->ywpn>>8;
+		else pg.cursor_pos = 0;
+	}
+
+	opening_subscr_show_bottom_8px = show_bottom_8px;
+
+	int distance = opening_subscr_show_bottom_8px ? 176 : 168;
+	int offy = passive_subscreen_height;
+
+	FFCore.initZScriptSubscreenScript();
+	ScopedScriptEngineDataClear engine_data_guard{ScriptType::EngineSubscreen, 0};
+	subscrpg_clear_animation();
+	subscreen_open = true;
+	for(int32_t y = -distance; y <= 0; y += 3*Hero.subscr_speed)
+	{
+		if(replay_version_check(19))
+		{
+			load_control_state();
+			script_drawing_commands.Clear();
+		}
+		active_sub_yoff = y-playing_field_offset;
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0))
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+		do_dcounters();
+		Hero.refill();
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0) && FFCore.waitdraw(ScriptType::EngineSubscreen,0))
+		{
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+			FFCore.waitdraw(ScriptType::EngineSubscreen,0) = false;
+		}
+		//fill in the screen with black to prevent the hall of mirrors effect
+		clear_to_color(framebuf, 0);
+
+		// With COOLSCROLL on, the subscreen crawls down over the playing field.
+		// Otherwise the playing field scrolls down past the bottom of the screen.
+		if(COOLSCROLL)
+		{
+			blit(scrollbuf,framebuf,0,0,0,passive_subscreen_height,256,176);
+		}
+		else
+		{
+			blit(scrollbuf,framebuf,0,0,0,y+distance+passive_subscreen_height,256,-y+(opening_subscr_show_bottom_8px?8:0));
+		}
+		
+		draw_subscrs(framebuf,0,y,showtime,sspSCROLLING);
+		if(replay_version_check(19))
+			do_script_draws(framebuf, tmpscr, 0, playing_field_offset);
+		
+		advanceframe(false);
+		
+		if(Quit)
+			return;
+	}
+	active_sub_yoff = -playing_field_offset;
+	bool done=false;
+
+	// Consume whatever input was registered during opening animation.
+	if (replay_version_check(18))
+		load_control_state();
+
+	bool legacy_btn_press_peek = false;
+	if (replay_is_active())
+	{
+		std::string qst = replay_get_meta_str("qst");
+		legacy_btn_press_peek |= qst == "demosp253.qst";
+		legacy_btn_press_peek |= qst == "first_quest_layered.qst";
+		legacy_btn_press_peek |= qst == "hell_awaits.qst";
+	}
+
+	do
+	{
+		if (replay_version_check(0, 11))
+			load_control_state();
+		if(replay_version_check(19))
+			script_drawing_commands.Clear();
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0))
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+		auto pgnum = new_subscreen_active->curpage;
+		auto& pg = new_subscreen_active->cur_page();
+		bool can_btn = !subscr_pg_animating;
+		if(can_btn)
+		{
+			byte btn_press = getIntBtnInput(0xFF, true, false, false, false, legacy_btn_press_peek);
+			int32_t pos = pg.cursor_pos;
+			
+			if(rUp())         pg.move_cursor(SEL_UP);
+			else if(rDown())  pg.move_cursor(SEL_DOWN);
+			else if(rLeft())  pg.move_cursor(SEL_LEFT);
+			else if(rRight()) pg.move_cursor(SEL_RIGHT);
+			else if(compat)
+			{
+				if(rLbtn())
+				{
+					if (!get_qr(qr_NO_L_R_BUTTON_INVENTORY_SWAP))
+					{
+						pg.cursor_pos = pg.movepos_legacy(SEL_LEFT, (pos<<8)|pg.getIndex(), 255, 255, 255, false, true)>>8;
+					}
+				}
+				else if(rRbtn() )
+				{
+					if (!get_qr(qr_NO_L_R_BUTTON_INVENTORY_SWAP)) 
+					{
+						pg.cursor_pos = pg.movepos_legacy(SEL_RIGHT, (pos<<8)|pg.getIndex(), 255, 255, 255, false, true)>>8;
+					}
+				}
+				else if(rEx3btn() )
+				{
+					if ( use_a && get_qr(qr_USE_EX1_EX2_INVENTORYSWAP) )
+					{
+						selectNextAWpn(SEL_LEFT);
+					}
+				}
+				else if(rEx4btn() )
+				{
+					if ( use_a && get_qr(qr_USE_EX1_EX2_INVENTORYSWAP) )
+					{
+						selectNextAWpn(SEL_RIGHT);
+					}
+				}
+			}
+			
+			if(pos!=pg.cursor_pos)
+				sfx(QMisc.miscsfx[sfxSUBSCR_CURSOR_MOVE]);
+			
+			SubscrWidget* widg = pg.get_sel_widg();
+			
+			if(widg)
+			{
+				bool can_interact = true, can_equip = true,
+					must_equip = false, can_unequip = noverify;
+				auto eqwpn = widg->getItemVal();
+				if(widg->getType() == widgITEMSLOT)
+				{
+					if((widg->flags & SUBSCR_CURITM_NO_INTER_WO_ITEM)
+						&& widg->getDisplayItem() < 0)
+						can_interact = false;
+					if(widg->flags & SUBSCR_CURITM_NONEQP)
+						can_equip = false;
+					if(widg->flags & SUBSCR_CURITM_NO_UNEQUIP)
+						can_unequip = false;
+					must_equip = !b_only && (widg->flags & SUBSCR_CURITM_NO_INTER_WO_EQUIP);
+				}
+				if(must_equip && (!can_equip || eqwpn < 0))
+					can_interact = false;
+				
+				if(can_interact)
+				{
+					auto bpress = btn_press;
+					if(must_equip)
+					{
+						bpress &= ((!can_unequip || Bwpn!=eqwpn) ? INT_BTN_B : 0)
+							| ((use_a && (!can_unequip || Awpn!=eqwpn)) ? INT_BTN_A : 0)
+							| ((use_x && (!can_unequip || Xwpn!=eqwpn)) ? INT_BTN_X : 0)
+							| ((use_y && (!can_unequip || Ywpn!=eqwpn)) ? INT_BTN_Y : 0);
+					}
+					if(widg->generic_script && (bpress&widg->gen_script_btns))
+					{
+						FFCore.runGenericFrozenEngine(widg->generic_script, widg->generic_initd);
+						eqwpn = widg->getItemVal(); //update incase script changed
+						if(must_equip) //update values depending on eqwpn
+						{
+							bpress = btn_press;
+							bpress &= (Bwpn!=eqwpn ? INT_BTN_B : 0)
+								| ((use_a && Awpn!=eqwpn) ? INT_BTN_A : 0)
+								| ((use_x && Xwpn!=eqwpn) ? INT_BTN_X : 0)
+								| ((use_y && Ywpn!=eqwpn) ? INT_BTN_Y : 0);
+						}
+					}
+					
+					if(can_equip)
+					{
+						if(eqwpn > -1)
+						{
+							if(b_only || (btn_press&INT_BTN_B))
+							{
+								if(can_unequip && !b_only && eqwpn == Bwpn)
+								{
+									Bwpn = -1;
+									game->forced_bwpn = -1;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									
+									game->bwpn = 255;
+									directItemB = -1;
+								}
+								else
+								{
+									if(use_a && eqwpn == Awpn)
+									{
+										Awpn = Bwpn;
+										game->awpn = game->bwpn;
+										directItemA = directItemB;
+									}
+									else if(use_x && eqwpn == Xwpn)
+									{
+										Xwpn = Bwpn;
+										game->xwpn = game->bwpn;
+										directItemX = directItemB;
+									}
+									else if(use_y && eqwpn == Ywpn)
+									{
+										Ywpn = Bwpn;
+										game->ywpn = game->bwpn;
+										directItemY = directItemB;
+									}
+									
+									Bwpn = eqwpn;
+									game->forced_bwpn = -1; //clear forced if the item is selected using the actual subscreen
+									if(!b_only) sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									game->bwpn = ((pg.cursor_pos)<<8) | new_subscreen_active->curpage;
+									directItemB = NEG_OR_MASK(eqwpn,0xFF);
+								}
+							}
+							else if(use_a && (btn_press&INT_BTN_A))
+							{
+								if(can_unequip && eqwpn == Awpn)
+								{
+									Awpn = -1;
+									game->forced_awpn = -1;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									
+									game->awpn = 255;
+									directItemA = -1;
+								}
+								else
+								{
+									if(eqwpn == Bwpn)
+									{
+										Bwpn = Awpn;
+										game->bwpn = game->awpn;
+										directItemB = directItemA;
+									}
+									else if(use_x && eqwpn == Xwpn)
+									{
+										Xwpn = Awpn;
+										game->xwpn = game->awpn;
+										directItemX = directItemA;
+									}
+									else if(use_y && eqwpn == Ywpn)
+									{
+										Ywpn = Awpn;
+										game->ywpn = game->awpn;
+										directItemY = directItemA;
+									}
+									
+									Awpn = eqwpn;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									game->awpn = ((pg.cursor_pos)<<8) | new_subscreen_active->curpage;
+									game->forced_awpn = -1; //clear forced if the item is selected using the actual subscreen
+									directItemA = NEG_OR_MASK(eqwpn,0xFF);
+								}
+							}
+							else if(use_x && (btn_press&INT_BTN_EX1))
+							{
+								if(can_unequip && eqwpn == Xwpn)
+								{
+									Xwpn = -1;
+									game->forced_xwpn = -1;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									
+									game->xwpn = 255;
+									directItemX = -1;
+								}
+								else
+								{
+									if(eqwpn == Bwpn)
+									{
+										Bwpn = Xwpn;
+										game->bwpn = game->xwpn;
+										directItemB = directItemX;
+									}
+									else if(use_a && eqwpn == Awpn)
+									{
+										Awpn = Xwpn;
+										game->awpn = game->xwpn;
+										directItemA = directItemX;
+									}
+									else if(use_y && eqwpn == Ywpn)
+									{
+										Ywpn = Xwpn;
+										game->ywpn = game->xwpn;
+										directItemY = directItemX;
+									}
+									
+									Xwpn = eqwpn;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									game->xwpn = ((pg.cursor_pos)<<8) | new_subscreen_active->curpage;
+									game->forced_xwpn = -1; //clear forced if the item is selected using the actual subscreen
+									directItemX = NEG_OR_MASK(eqwpn,0xFF);
+								}
+							}
+							else if(use_y && (btn_press&INT_BTN_EX2))
+							{
+								if(can_unequip && eqwpn == Ywpn)
+								{
+									Ywpn = -1;
+									game->forced_ywpn = -1;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									
+									game->ywpn = 255;
+									directItemY = -1;
+								}
+								else
+								{
+									if(eqwpn == Bwpn)
+									{
+										Bwpn = Ywpn;
+										game->bwpn = game->ywpn;
+										directItemB = directItemY;
+									}
+									else if(use_a && eqwpn == Awpn)
+									{
+										Awpn = Ywpn;
+										game->awpn = game->ywpn;
+										directItemA = directItemY;
+									}
+									else if(use_x && eqwpn == Xwpn)
+									{
+										Xwpn = Ywpn;
+										game->xwpn = game->ywpn;
+										directItemX = directItemY;
+									}
+									
+									Ywpn = eqwpn;
+									sfx(QMisc.miscsfx[sfxSUBSCR_ITEM_ASSIGN]);
+									game->ywpn = ((pg.cursor_pos)<<8) | new_subscreen_active->curpage;
+									game->forced_ywpn = -1; //clear forced if the item is selected using the actual subscreen
+									directItemY = NEG_OR_MASK(eqwpn,0xFF);
+								}
+							}
+						}
+					}
+					if(!must_equip || eqwpn > -1)
+						widg->check_btns(bpress,*new_subscreen_active);
+				}
+			}
+			if(new_subscreen_active->curpage == pgnum)
+				new_subscreen_active->check_btns(btn_press);
+		}
+		
+		do_dcounters();
+		Hero.refill();
+		
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0) && FFCore.waitdraw(ScriptType::EngineSubscreen,0))
+		{
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+			FFCore.waitdraw(ScriptType::EngineSubscreen,0) = false;
+		}
+
+		clear_to_color(framebuf, 0);
+
+		if(COOLSCROLL) //copy the playing field back onto the screen
+			blit(scrollbuf,framebuf,0,0,0,passive_subscreen_height,256,176);
+		//else nothing to do; the playing field has scrolled off the screen
+		
+		//draw the passive and active subscreen
+		draw_subscrs(framebuf,0,0,showtime,sspDOWN);
+		if(replay_version_check(19))
+			do_script_draws(framebuf, tmpscr, 0, playing_field_offset);
+		
+		advanceframe(false);
+		if (replay_version_check(11))
+			load_control_state();
+		
+		if(can_btn && NESquit && Up() && cAbtn() && cBbtn())
+		{
+			down_control_states[btnUp] = true;
+			Quit=qQUIT;
+		}
+		
+		if(Quit)
+			return;
+			
+		if(can_btn && rSbtn())
+			done=true;
+	}
+	while(!done);
+
+	subscrpg_clear_animation();
+	for(int32_t y = 0; y >= -distance; y -= 3*Hero.subscr_speed)
+	{
+		if(replay_version_check(19))
+		{
+			load_control_state();
+			script_drawing_commands.Clear();
+		}
+		active_sub_yoff = y-playing_field_offset;
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0))
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+		do_dcounters();
+		Hero.refill();
+		if(new_subscreen_active->script && FFCore.doscript(ScriptType::EngineSubscreen,0) && FFCore.waitdraw(ScriptType::EngineSubscreen,0))
+		{
+			ZScriptVersion::RunScript(ScriptType::EngineSubscreen, new_subscreen_active->script, 0);
+			FFCore.waitdraw(ScriptType::EngineSubscreen,0) = false;
+		}
+		//fill in the screen with black to prevent the hall of mirrors effect
+		clear_to_color(framebuf, 0);
+		
+		if(COOLSCROLL)
+		{
+			blit(scrollbuf,framebuf,0,0,0,passive_subscreen_height,256,176);
+		}
+		else
+		{
+			blit(scrollbuf,framebuf,0,0,0,y+distance+passive_subscreen_height,256,-y+(opening_subscr_show_bottom_8px?8:0));
+		}
+		
+		draw_subscrs(framebuf,0,y,showtime,sspSCROLLING);
+		if(replay_version_check(19))
+			do_script_draws(framebuf, tmpscr, 0, playing_field_offset);
+		advanceframe(false);
+		
+		if(Quit)
+			return;
+	}
+	active_sub_yoff = -224;
+	subscreen_open = false;
+	updateShowBottomPixels(); // might have changed.
+	if(usebombpal)
+	{
+		memcpy(RAMpal, temppal, PAL_SIZE*sizeof(RGB));
+	}
+	
+	resume_sfx(WAV_BRANG);
+}
+void dosubscr()
+{
+	if(zc255_bridge_active()){zc255_ui_request();return;}
+	bool skipdraws = FFCore.skipscriptdraws;
+	FFCore.skipscriptdraws = false;
+
+	// The active subscreen blocks in the middle of a game_loop frame, and its
+	// internal loops repeatedly clear the script drawing queue. Stash the draws
+	// the interrupted frame already queued and restore them once the subscreen
+	// closes, so the frame that resumes doesn't render without its script draws.
+	CScriptDrawingCommands* outer_draws = script_drawing_commands.pop_commands();
+
+	_dosubscr();
+
+	// Anything the subscreen's own scripts left queued was already rendered
+	// by the subscreen loops; drop it before restoring the stashed draws.
+	script_drawing_commands.Clear();
+	script_drawing_commands.push_commands(outer_draws);
+
+	FFCore.skipscriptdraws = skipdraws;
+}
+
+void markBmap(int32_t dir, int32_t sc, int32_t dmap)
+{
+    if(dmap < 0)
+        dmap = get_currdmap();
+
+    if(sc>=128 || sc<0)
+    {
+        return;
+    }
+
+    byte drow = DMaps[dmap].grid[sc>>4];
+    byte mask = 1 << (7-((sc&15)-DMaps[dmap].xoff));
+    int32_t di = (dmap << 7) + (sc & 0x7F); //+ ((sc&0xF)-(DMaps[dmap].type==dmOVERW ? 0 : DMaps[dmap].xoff));
+    int32_t code = 0;
+
+    switch((DMaps[dmap].type&dmfTYPE))
+    {
+    case dmDNGN:
+		if(get_qr(qr_DUNGEONS_USE_CLASSIC_CHARTING))
+		{
+			// check dmap
+			if((drow&mask)==0) //Only squares marked in dmap editor can be charted
+				return;
+				
+			// calculate code
+			for(int32_t i=3; i>=0; i--)
+			{
+				code <<= 1;
+				code += tmpscr->door[i]&1; //Mark directions only for sides that have the door state set
+			}
+			
+			// mark the map
+			game->bmaps[di] = code|128;
+		}
+		else goto bmaps_default;
+        break;
+        
+    case dmOVERW:
+		if(get_qr(qr_NO_OVERWORLD_MAP_CHARTING))
+			break;
+        
+    default:
+	bmaps_default:
+        game->bmaps[di] |= 128;
+        
+        if(dir>=0)
+            game->bmaps[di] |= (1<<dir);
+            
+        break;
+    }
+}
+
+void markBmap(int32_t dir)
+{
+    markBmap(dir, get_currscr());
+}
+
+void put_passive_subscr(BITMAP *dest,int32_t x,int32_t y,bool showtime,int32_t pos2)
+{
+	++subscr_item_clk;
+	animate_subscr_buttonitems();
+	BITMAP *subscr = create_sub_bitmap(dest,x,y,256,passive_subscreen_height);
+	
+	if(no_subscreen())
+	{
+		if (playing_field_offset)
+			rectfill(subscr, 0, 0, subscr->w, playing_field_offset, 0);
+		destroy_bitmap(subscr);
+		return;
+	}
+	
+	show_custom_subscreen(subscr, new_subscreen_passive, 0, 0, showtime, pos2);
+	destroy_bitmap(subscr);
+	if(new_subscreen_overlay)
+	{
+		subscr = create_sub_bitmap(dest,x,0,dest->w,dest->h);
+		show_custom_subscreen(subscr, new_subscreen_overlay, 0, 0, showtime, pos2);
+		destroy_bitmap(subscr);
+	}
+}

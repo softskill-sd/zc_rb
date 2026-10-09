@@ -1,0 +1,10 @@
+/build/
+/dist/
+*.pdb
+*.obj
+*.lib
+*.log
+*.sav
+*.state*
+*.zplay
+.env*

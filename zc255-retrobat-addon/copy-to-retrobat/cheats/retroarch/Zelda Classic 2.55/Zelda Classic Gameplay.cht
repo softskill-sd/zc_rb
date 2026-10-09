@@ -1,0 +1,16 @@
+cheats = "3"
+
+cheat0_desc = "Invulnerability"
+cheat0_code = "invulnerability"
+cheat0_enable = "false"
+cheat0_handler = "0"
+
+cheat1_desc = "Walk through walls (also grants invulnerability)"
+cheat1_code = "walls"
+cheat1_enable = "false"
+cheat1_handler = "0"
+
+cheat2_desc = "Refill selected resources once (select in Core Options)"
+cheat2_code = "refill"
+cheat2_enable = "false"
+cheat2_handler = "0"

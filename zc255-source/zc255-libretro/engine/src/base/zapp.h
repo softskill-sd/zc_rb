@@ -1,0 +1,37 @@
+#ifndef _ZAPP_H_
+#define _ZAPP_H_
+
+#include <functional>
+#include <optional>
+#include <string>
+#include <utility>
+
+enum App {
+    undefined,
+    zelda,
+    zquest,
+    launcher,
+    zscript,
+	updater,
+};
+
+void common_main_setup(App id, int argc, char **argv);
+std::optional<bool> get_flag_bool(const char* name);
+std::optional<std::string> get_flag_string(const char* name);
+std::string zapp_get_exe_folder_path();
+App get_app_id();
+bool is_web();
+bool is_ci();
+void set_headless_mode();
+bool is_headless();
+std::pair<int, int> zc_get_default_display_size(int base_width, int base_height, int saved_width, int saved_height, int max_scale = 3);
+// Repaints the display. Set by each app to its own render function, so that
+// zc_process_display_events can put a frame up as soon as the window is resized.
+extern void (*zalleg_redraw_display)();
+void zc_process_display_events();
+void zapp_set_crash_cb(std::function<void()> cb);
+void zapp_reporting_add_breadcrumb(const char* category, const char* message);
+void zapp_reporting_set_tag(const char* key, const char* value);
+void zapp_reporting_set_tag(const char* key, int value);
+
+#endif

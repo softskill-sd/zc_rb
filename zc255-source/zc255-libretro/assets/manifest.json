@@ -1,0 +1,119 @@
+{
+  "identity": "73cf3f7a0aece40dc9464eb235aa5e77878719090982bcd2b4358edd9ed67f0d",
+  "entries": [
+    {
+      "path": "allegro5.cfg",
+      "resource_id": 30000,
+      "size": 7900,
+      "sha256": "0708b3a1a70ab3fdb946dac020553327ba1af9e141604055470f93dd0cee446f"
+    },
+    {
+      "path": "assets/190_tiles.qst",
+      "resource_id": 30001,
+      "size": 162657,
+      "sha256": "d34518db9d9dfbdcabbb17d91d17f410db501a30110f79c7e675cf99f7f7fdfc"
+    },
+    {
+      "path": "assets/cursor.bmp",
+      "resource_id": 30002,
+      "size": 1334,
+      "sha256": "cc0cf14589b378f2cb1bc941e500d9c2a8c478f3c41c25af95842b1ab1b20c47"
+    },
+    {
+      "path": "assets/dungeon.mid",
+      "resource_id": 30003,
+      "size": 2506,
+      "sha256": "5a01be35680baa8643fa908e32eb20636eeaed6c62e5d6f96f5274d8b870a509"
+    },
+    {
+      "path": "assets/ending.mid",
+      "resource_id": 30004,
+      "size": 12073,
+      "sha256": "cabe8b03fb65decb6323dd4ffa112b577f9e8ac7e6d6fd3e6b234bd136f996e5"
+    },
+    {
+      "path": "assets/gameover.mid",
+      "resource_id": 30005,
+      "size": 685,
+      "sha256": "0f03243ecbad9f475a90d476bddef6a8c49676960510597a4c68a5e89551812c"
+    },
+    {
+      "path": "assets/gui_pal.bmp",
+      "resource_id": 30006,
+      "size": 1334,
+      "sha256": "20f25c342305b9d948974769cade7795a91d57e845d1e69c078f26cb28fec15a"
+    },
+    {
+      "path": "assets/level9.mid",
+      "resource_id": 30007,
+      "size": 3357,
+      "sha256": "4bacdc890f4cb1329ec4250fe7b4e2b3121a2a51f5e7509750c60b8befdd3d5b"
+    },
+    {
+      "path": "assets/overworld.mid",
+      "resource_id": 30008,
+      "size": 8404,
+      "sha256": "2f5e2b79b95efe969d9af8b7c2986b6e982695f5490186519221377ad0babac3"
+    },
+    {
+      "path": "assets/title.mid",
+      "resource_id": 30009,
+      "size": 8601,
+      "sha256": "57b2505f0d172da54da29054265f1e7096d7b8e056dcdcdbb7625ff8081a1347"
+    },
+    {
+      "path": "assets/triforce.mid",
+      "resource_id": 30010,
+      "size": 658,
+      "sha256": "9b1f6abea67be5e5efdce2b1ada85a66df041e67528a70d9e0532117b4ffdec5"
+    },
+    {
+      "path": "base_config/zc.cfg",
+      "resource_id": 30011,
+      "size": 3593,
+      "sha256": "4be1e7d9742ed291b4fdd56fc562bacbab68b3f97d38555332b1013ff49c6602"
+    },
+    {
+      "path": "base_config/zscript.cfg",
+      "resource_id": 30012,
+      "size": 242,
+      "sha256": "83682473c9d9cccecf419634da7622594f3c10d84b402204842c04e449a49cce"
+    },
+    {
+      "path": "Classic.nsf",
+      "resource_id": 30013,
+      "size": 61568,
+      "sha256": "cf6256c64327a3edeb259fbc6ac09102273bbbbf0f0cff26dbbd1a256ce12e3e"
+    },
+    {
+      "path": "default.sf2",
+      "resource_id": 30014,
+      "size": 32319396,
+      "sha256": "9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe"
+    },
+    {
+      "path": "gamecontrollerdb.txt",
+      "resource_id": 30015,
+      "size": 610778,
+      "sha256": "fc61fec34b1c431596aa9701ace5d8674d0e93137c52d2dfe508386efe1ee719"
+    },
+    {
+      "path": "modules/classic/classic_fonts.dat",
+      "resource_id": 30016,
+      "size": 102765,
+      "sha256": "e1008c6ea910a67071ef5825a9dfe5324fbacd15af2e050d0a5325e13f880958"
+    },
+    {
+      "path": "modules/classic.zmod",
+      "resource_id": 30017,
+      "size": 14616,
+      "sha256": "51338b57d227d4bb44aadfcf8d71bccf6c3f8e893b55f50c2cd6554e895911b1"
+    },
+    {
+      "path": "sfx.dat",
+      "resource_id": 30018,
+      "size": 1249133,
+      "sha256": "ddd7595fb1320cf758896d75e48cef14e331336601e215a99d54427d741040f7"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+Put your .qst quest files in this folder, then restart RetroBat or refresh the game list.
